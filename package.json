@@ -26,13 +26,13 @@
   },
   "license": "MIT",
   "author": "Digital Pine (https://digitalpine.io)",
-  "homepage": "https://github.com/DigitalPine/askq#readme",
+  "homepage": "https://github.com/thebrubaker/askq#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DigitalPine/askq.git"
+    "url": "git+https://github.com/thebrubaker/askq.git"
   },
   "bugs": {
-    "url": "https://github.com/DigitalPine/askq/issues"
+    "url": "https://github.com/thebrubaker/askq/issues"
   },
   "keywords": [
     "cli",
