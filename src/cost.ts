@@ -21,9 +21,14 @@ export function costOf(tokensIn: number, tokensOut: number, model: string): numb
   return (tokensIn * price.in + tokensOut * price.out) / 1_000_000;
 }
 
-export function estimate(promptChars: number, pointers: number, model: string): Estimate {
+export function estimate(
+  promptChars: number,
+  pointers: number,
+  model: string,
+  fixedOut = OUT_TOKENS_FIXED,
+): Estimate {
   const tokensIn = Math.ceil(promptChars / CHARS_PER_TOKEN);
-  const tokensOut = pointers * OUT_TOKENS_PER_POINTER + OUT_TOKENS_FIXED;
+  const tokensOut = pointers * OUT_TOKENS_PER_POINTER + fixedOut;
   return { tokensIn, tokensOut, usd: costOf(tokensIn, tokensOut, model) };
 }
 

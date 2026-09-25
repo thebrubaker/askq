@@ -157,7 +157,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
     return 2;
   }
 
-  const guess = why ? chunkEstimate(windowPrompts, plan, overviewPrompt, cfg.model) : single;
+  const guess = why ? chunkEstimate(view, windowPrompts, plan, overviewPrompt, cfg.model) : single;
   if (cfg.maxCost !== undefined && !cfg.yes && guess.usd !== undefined && guess.usd > cfg.maxCost) {
     deps.notice(
       `askq: estimated ~${formatUsd(guess.usd)} for ${view.pointers.length} items` +
@@ -472,23 +472,24 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
 
 export type ChunkWhy = "flag" | "items" | "tokens";
 
+export const WINDOW_OUT_FIXED = 150;
+export const OVERVIEW_OUT_FIXED = 100;
+export const LEADS_SHARE = 0.5;
+export const LEADS_FRAME_CHARS = 2_000;
+
 function chunkEstimate(
+  view: View,
   prompts: string[],
   plan: Window[],
   overviewPrompt: string,
   model: string,
 ): Estimate {
+  const sentChars = view.sent.reduce((n, e) => n + e.rendered.length, 0);
+  const leadsChars = Math.min(LEADS_MAX_CHARS, LEADS_SHARE * sentChars) + LEADS_FRAME_CHARS;
   const parts = [
-    ...prompts.map((p, k) => estimate(p.length, plan[k]!.pointers.length, model)),
-    estimate(overviewPrompt.length, 0, OVERVIEW_MODEL),
-    estimate(
-      Math.min(
-        LEADS_MAX_CHARS,
-        prompts.reduce((n, p) => n + p.length, 0),
-      ),
-      0,
-      model,
-    ),
+    ...prompts.map((p, k) => estimate(p.length, plan[k]!.pointers.length, model, WINDOW_OUT_FIXED)),
+    estimate(overviewPrompt.length, 0, OVERVIEW_MODEL, OVERVIEW_OUT_FIXED),
+    estimate(leadsChars, 0, model),
   ];
   const usd = parts.every((p) => p.usd !== undefined)
     ? parts.reduce((n, p) => n + p.usd!, 0)
