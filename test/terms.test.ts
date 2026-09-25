@@ -1,24 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { parseResponse } from "../src/parse";
 import { buildPrompt } from "../src/prompt";
 import { buildView } from "../src/render";
 import { resolveRoles } from "../src/roles";
 import { buildTerms, formsOf, splitTerms } from "../src/terms";
-import { answerAll, jsonl, lineRecords, posts, runWith, type Ran } from "./helpers";
+import {
+  answerAll,
+  jsonl,
+  lineRecords,
+  posts,
+  runPrinted as runInShell,
+  runWith,
+  type Ran,
+} from "./helpers";
 
 const termBlock = (r: Ran) => r.text.split("\nterms — ")[1]?.split("\n\n")[0] ?? "";
 
 function runPrinted(r: Ran, command: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "askq-terms-"));
-  const file = join(dir, "records.jsonl");
-  writeFileSync(file, r.records.map((x) => JSON.stringify(x)).join("\n") + "\n");
-  const res = spawnSync("sh", ["-c", command.replace("/tmp/askq-test/records.jsonl", file)], {
-    encoding: "utf8",
-  });
+  const res = runInShell(r, command);
   expect(res.status).toBe(0);
   return res.stdout;
 }
@@ -108,7 +107,7 @@ describe("terms: the roll-up", () => {
       },
     );
     expect(termBlock(r)).toContain(
-      'Kyutai Pocket TTS · from context · also as "Pocket TTS" · 1 item: 0 read, 0 maybe, 1 skipped (5)',
+      'Kyutai Pocket TTS · from context · also as "Pocket TTS" · 1 item: 0 read, 0 maybe, 1 skipped (promo): lines 5',
     );
     expect(lineRecords(r).find((x) => x.askq_line === 5)!.askq_terms).toEqual([
       "Kyutai Pocket TTS",
@@ -135,12 +134,24 @@ describe("terms: the roll-up", () => {
     const block = termBlock(r);
     expect(block.split("\n").slice(1)).toHaveLength(1);
     expect(block).toContain(
-      "Kokoro · from --watch · 100 items: 0 read, 0 maybe, 100 skipped: jq -c ",
+      "Kokoro · from --watch · 100 items: 0 read, 0 maybe, 100 skipped (all chatter): jq -c ",
     );
-    expect(block).not.toMatch(/\(\d+(, \d+)+\)/);
+    expect(block).not.toMatch(/lines \d/);
     expect(r.rollup.length).toBeLessThan(40);
-    const command = /(jq -c '[^']+' \S+)/.exec(block)![1]!;
+    const command = /(jq -c '[^']+' "\$R")/.exec(block)![1]!;
     expect(runPrinted(r, command).trim().split("\n")).toHaveLength(100);
+  });
+
+  test("a term's skipped items say what the model took them for, most common tags first", async () => {
+    const replies = posts(12, (i) => ({
+      text: `@maker love it, Kokoro version ${i}`,
+    }));
+    const tagOf = (p: string) => {
+      const n = Number(p.slice(1));
+      return n <= 7 ? "s praise" : n <= 10 ? "s reaction" : "s question";
+    };
+    const r = await runWith(jsonl(replies), answerAll(tagOf), { watch: ["Kokoro"] });
+    expect(termBlock(r)).toContain("12 skipped (mostly praise, reaction): jq -c ");
   });
 
   test("maybe items naming a term come first, so the maybe cap cannot hide them", async () => {
@@ -160,7 +171,17 @@ describe("terms: the roll-up", () => {
     const r = await runWith(jsonl([{ id: "1", author: "@x", text: long }]), answerAll());
     const note = r.rollup.filter((l) => l.startsWith("snippets are cut at"));
     expect(note).toHaveLength(1);
-    const command = /(jq -r '[^']+' \S+)/.exec(note[0]!)![1]!;
+    const command = /(jq -r '[^']+' "\$R")/.exec(note[0]!)![1]!;
     expect(runPrinted(r, command).trim()).toBe(long);
   });
+});
+
+test("a term's skipped lines are listed in line order", async () => {
+  const items = posts(6, (i) => ({ text: `Kokoro note ${i}`, thread_root_id: i % 2 ? "a" : "b" }));
+  const r = await runWith(
+    jsonl(items),
+    answerAll(() => "s chatter"),
+    { watch: ["Kokoro"] },
+  );
+  expect(r.text).toContain("6 skipped (all chatter): lines 1, 2, 3, 4, 5, 6");
 });

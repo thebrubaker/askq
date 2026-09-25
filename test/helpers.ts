@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CallResult, Client } from "../src/gemini";
 import { run, type RunConfig } from "../src/run";
 
@@ -76,6 +80,7 @@ export async function runWith(
   cfg: Partial<RunConfig> = {},
 ): Promise<Ran> {
   const { client, prompts } = fakeClient(answer);
+  const recordsPath = join(mkdtempSync(join(tmpdir(), "askq-test-")), "records.jsonl");
   const rollupLines: string[] = [];
   const notices: string[] = [];
   let written: string[] = [];
@@ -94,7 +99,13 @@ export async function runWith(
     {
       client: () => client,
       rollupOut: (l) => rollupLines.push(l),
-      recordsOut: { path: "/tmp/askq-test/records.jsonl", write: (lines) => (written = lines) },
+      recordsOut: {
+        path: recordsPath,
+        write: (lines) => {
+          written = lines;
+          writeFileSync(recordsPath, lines.join("\n") + "\n");
+        },
+      },
       notice: (l) => notices.push(l),
       now: (() => {
         let t = 0;
@@ -111,6 +122,16 @@ export async function runWith(
     text: rollupLines.join("\n"),
   };
 }
+
+export function runPrinted(r: Ran, command: string): { status: number | null; stdout: string } {
+  const assign = r.rollup.find((l) => l.startsWith("R="));
+  if (!assign) throw new Error("the roll-up printed no R= line");
+  const res = spawnSync("sh", ["-c", `${assign}\n${command}`], { encoding: "utf8" });
+  return { status: res.status, stdout: res.stdout };
+}
+
+export const printedCommands = (r: Ran) =>
+  r.rollup.flatMap((l) => [...l.matchAll(/(jq -[cr] '[^']+' "\$R")/g)].map((m) => m[1]!));
 
 export const lineRecords = (r: Ran) => r.records.filter((x) => typeof x.askq_line === "number");
 

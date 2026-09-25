@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { answerAll, jsonl, lineRecords, posts, runWith } from "./helpers";
+import {
+  answerAll,
+  jsonl,
+  lineRecords,
+  posts,
+  printedCommands,
+  runPrinted,
+  runWith,
+} from "./helpers";
 
 describe("guards that refuse before anything is sent", () => {
   test("over --max-cost: exit 3, no call", async () => {
@@ -17,7 +22,12 @@ describe("guards that refuse before anything is sent", () => {
     const r = await runWith(jsonl(posts(12)), answerAll(), { maxItems: 10 });
     expect(r.code).toBe(2);
     expect(r.prompts).toHaveLength(0);
-    expect(r.notices.join("\n")).toContain("over the 10 one call can safely handle");
+    const said = r.notices.join("\n");
+    expect(said).toContain(
+      "12 items to judge is over the 10 one call can safely handle. Nothing was sent.",
+    );
+    expect(said).toContain("never judged");
+    expect(said).toContain("By time, at the midpoint: jq -c 'select(.created_at < \"2026-01-0");
   });
 
   test("--print-prompt calls nothing", async () => {
@@ -128,18 +138,15 @@ describe("roll-up", () => {
   test("the commands it prints run verbatim against the records it wrote", async () => {
     if (spawnSync("jq", ["--version"]).status !== 0) return;
     const r = await runWith(jsonl(posts(60)), answerAll());
-    const dir = mkdtempSync(join(tmpdir(), "askq-test-"));
-    const file = join(dir, "records.jsonl");
-    writeFileSync(file, r.records.map((x) => JSON.stringify(x)).join("\n") + "\n");
-    const commands = r.rollup
-      .flatMap((l) => [...l.matchAll(/(jq -c '[^']+' \S+)/g)].map((m) => m[1]!))
-      .map((c) => c.replace("/tmp/askq-test/records.jsonl", file));
-    expect(commands.length).toBeGreaterThanOrEqual(2);
+    expect(r.rollup.filter((l) => l.startsWith("R="))).toHaveLength(1);
+    expect(r.text).not.toContain(" /tmp/askq-test-");
+    const commands = printedCommands(r);
+    expect(commands.length).toBeGreaterThanOrEqual(3);
     for (const c of commands) {
-      const res = spawnSync("sh", ["-c", c], { encoding: "utf8" });
+      const res = runPrinted(r, c);
       expect(res.status).toBe(0);
-      expect(res.stdout.trim().split("\n").length).toBeGreaterThan(0);
-      expect(res.stdout).toContain('"verdict":"read"');
+      expect(res.stdout.trim().length).toBeGreaterThan(0);
+      if (c.startsWith("jq -c")) expect(res.stdout).toContain('"verdict":"read"');
     }
   });
 });

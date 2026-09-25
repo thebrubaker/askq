@@ -132,8 +132,26 @@ function collapseByAuthor(view: View, pointers: string[]): Group[] {
 
 const jqString = (s: string) => JSON.stringify(s).replace(/'/g, "'\\''");
 
+export const RECORDS_REF = '"$R"';
+
+export function shellAssign(path: string): string {
+  return /^[A-Za-z0-9_./@%+=:,-]+$/.test(path) ? `R=${path}` : `R='${path.replace(/'/g, "'\\''")}'`;
+}
+
+function skipTags(judged: Map<string, Judgement>, view: View, skipped: string[]): string {
+  const counts = new Map<string, number>();
+  for (const p of skipped) {
+    const tag = isEmpty(view, p) ? "empty" : judged.get(p)?.tag || "untagged";
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  const tags = [...counts].sort((a, b) => b[1] - a[1]).map(([t]) => t);
+  if (tags.length === 1) return skipped.length > 1 ? ` (all ${tags[0]})` : ` (${tags[0]})`;
+  if (skipped.length <= 3) return ` (${tags.join(", ")})`;
+  return ` (mostly ${tags.slice(0, 2).join(", ")})`;
+}
+
 function termLines(input: RollupInput): string[] {
-  const { view, judged, file } = input;
+  const { view, judged } = input;
   const out: string[] = [];
   for (const [t, pointers] of input.hits) {
     const from = t.from.map((f) => (f === "context" ? "context" : "--watch")).join(" and ");
@@ -155,13 +173,17 @@ function termLines(input: RollupInput): string[] {
     const counts =
       `${pointers.length} item${pointers.length === 1 ? "" : "s"}: ${of("read").length} read, ` +
       `${of("maybe").length} maybe, ${skipped.length} skipped` +
+      (skipped.length ? skipTags(judged, view, skipped) : "") +
       (unjudged ? `, ${unjudged} without a verdict` : "");
     const detail =
       skipped.length === 0
         ? ""
         : skipped.length <= TERM_SKIP_LIST_CAP
-          ? ` (${skipped.map((p) => pointerLabel(view, p)).join(", ")})`
-          : `: jq -c 'select(.verdict=="skip" and any((.askq_terms // [])[]; . == ${jqString(t.term)}))' ${file}`;
+          ? `: lines ${[...skipped]
+              .sort((a, b) => (a[0] === b[0] ? lineOf(a) - lineOf(b) : a < b ? -1 : 1))
+              .map((p) => pointerLabel(view, p))
+              .join(", ")}`
+          : `: jq -c 'select(.verdict=="skip" and any((.askq_terms // [])[]; . == ${jqString(t.term)}))' ${RECORDS_REF}`;
     out.push(`${head}${counts}${detail}`);
   }
   return out;
@@ -209,9 +231,10 @@ export function rollup(input: RollupInput): string[] {
       `${(input.ms / 1000).toFixed(1)}s · ${input.tokensIn.toLocaleString("en-US")} in + ` +
       `${input.tokensOut.toLocaleString("en-US")} out tokens${cost}`,
   );
-  w(`records: ${file}`);
   w(
-    `         every item with its verdict, tag, reason and the item itself; the lists below are drawn from it`,
+    file === "(stdout)"
+      ? "records: on stdout (--out -); set R to the file you saved them in, and the commands below read it"
+      : `${shellAssign(file)}   # the records: every item with its verdict, tag, reason and the item itself; the commands below read "$R"`,
   );
   w(`roles: ${input.rolesLine}`);
 
@@ -280,7 +303,7 @@ export function rollup(input: RollupInput): string[] {
     w();
     w(
       `snippets are cut at ${SNIPPET_MAX} characters; the records hold the full text: ` +
-        `jq -r 'select(.askq_line==${lineOf(example)}) | .item${input.textPath ?? ""}' ${file}`,
+        `jq -r 'select(.askq_line==${lineOf(example)}) | .item${input.textPath ?? ""}' ${RECORDS_REF}`,
     );
   }
 
@@ -306,7 +329,9 @@ export function rollup(input: RollupInput): string[] {
       }
     }
     if (reached < pointers.length) {
-      w(`  … ${pointers.length - reached} more: jq -c 'select(.verdict=="${verdict}")' ${file}`);
+      w(
+        `  … ${pointers.length - reached} more: jq -c 'select(.verdict=="${verdict}")' ${RECORDS_REF}`,
+      );
     }
   };
   section("read first", read, READ_CAP, "read");
@@ -357,7 +382,7 @@ export function rollup(input: RollupInput): string[] {
       `the subject's own accounts, per the overview: ${input.own.map(at).join(" ")} (none of their posts skipped)`,
     );
   w(`checks: ${parts.join(" · ")}`);
-  w(`next: jq -c 'select(.verdict=="read")' ${file}`);
+  w(`next: jq -c 'select(.verdict=="read")' ${RECORDS_REF}`);
   return out;
 }
 

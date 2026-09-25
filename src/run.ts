@@ -14,12 +14,13 @@ import { parseLine, splitLines } from "./lines";
 import { parseResponse, type Claim } from "./parse";
 import { buildPrompt, buildRepairPrompt, type Ask } from "./prompt";
 import { blockRecord, lineRecord, type LineOutcome } from "./records";
-import { buildView } from "./render";
-import { describeRoles, resolveRoles, type Role } from "./roles";
+import { buildView, type View } from "./render";
+import { getPath } from "./field";
+import { describeRoles, resolveRoles, type Role, type Roles } from "./roles";
 import { displayOrder, rollup } from "./rollup";
 import { buildTerms, matchTerms, termsByPointer } from "./terms";
 
-export const VERSION = "0.2.0-dev";
+export const VERSION = "0.2.0";
 export const MAX_ITEMS = 800;
 export const MAX_INPUT_TOKENS = 400_000;
 
@@ -45,6 +46,37 @@ export type RunDeps = {
   now?: () => number;
   abort?: AbortSignal | undefined;
 };
+
+const ISO_START = /^\d{4}-\d{2}-\d{2}/;
+
+export function capRefusal(view: View, roles: Roles, totalLines: number, cap: number): string[] {
+  const refs = view.blocks.length;
+  const out = [
+    `askq: ${view.pointers.length} items to judge is over the ${cap} one call can safely handle. Nothing was sent.`,
+    `askq:   ${view.sent.length} posts${refs ? `, plus ${refs} posts they quote or repost: each of those is judged as an item too` : ""}.`,
+    "askq:   Split the input into two runs rather than filtering it: an item you drop to fit is never judged, " +
+      "and nothing will tell you it was missed.",
+  ];
+  const time = roles.time;
+  const stamps = time
+    ? view.sent
+        .map((e) => getPath(e.item, time.steps))
+        .filter((t): t is string => typeof t === "string" && ISO_START.test(t))
+        .sort()
+    : [];
+  if (time && stamps.length === view.sent.length && stamps.length > 1) {
+    const mid = JSON.stringify(stamps[Math.floor(stamps.length / 2)]);
+    out.push(
+      `askq:   By time, at the midpoint: jq -c 'select(${time.path} < ${mid})' for one run and ` +
+        `jq -c 'select(${time.path} >= ${mid})' for the other.`,
+    );
+  } else {
+    out.push(
+      `askq:   By position: split -l ${Math.ceil(totalLines / 2)} items.jsonl part- and run askq on each part.`,
+    );
+  }
+  return out;
+}
 
 export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise<number> {
   const now = deps.now ?? (() => Date.now());
@@ -74,11 +106,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
 
   const cap = cfg.maxItems ?? MAX_ITEMS;
   if (view.pointers.length > cap) {
-    deps.notice(
-      `askq: ${view.pointers.length} items to judge (${view.sent.length} posts + ${view.blocks.length} referenced) is over the ` +
-        `${cap} one call can safely handle, and splitting into several calls is not built yet. Nothing was sent. ` +
-        `Filter or split the input first (for example with jq, by date or by query).`,
-    );
+    for (const line of capRefusal(view, roles, lines.length, cap)) deps.notice(line);
     return 2;
   }
 

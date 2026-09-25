@@ -32,11 +32,12 @@ Requires `GEMINI_API_KEY`. About 13 seconds and 2 cents for 150 tweets.
 - **The records, in a file.** One JSON line per input line (`askq_line`, `askq_id`, `verdict`,
   `tag`, `reason`, `item`), then one per referenced post (`askq_ref`), after a first line holding
   the run (`askq_run`). By default under your temp directory, so scraped content can't land in a
-  repo by accident; `--out FILE` to choose. The roll-up names the path and prints the `jq` to read
-  on:
+  repo by accident; `--out FILE` to choose. The roll-up names the path once, as a shell
+  assignment, and every `jq` it prints after that reads `"$R"`:
 
 ```bash
-jq -c 'select(.verdict=="read")' /tmp/askq/20260925-141503-a1b2.jsonl
+R=/tmp/askq/20260925-141503-a1b2.jsonl
+jq -c 'select(.verdict=="read")' "$R"
 ```
 
 - **`--out -`** puts the records on stdout and the roll-up on stderr, for pipelines.
@@ -87,7 +88,9 @@ On a 150-tweet set with saved labels (scraped, so not in this repo), two identic
 
 ## Limits
 
-One call per run: over 800 items it refuses and names the cap. Gemini only.
+One call per run: over 800 items it refuses, naming the cap and the count. Posts that the items quote
+or repost are judged as items too, so they count. Split a larger pile into several runs, by time or
+by thread, rather than filtering it down: an item dropped to fit is never judged. Gemini only.
 
 ## Exit codes
 
@@ -101,5 +104,5 @@ One call per run: over 800 items it refuses and names the cap. Gemini only.
 
 ## Status
 
-0.2.0-dev, not published. 0.1.0 asked the question of each item in isolation; that design is in
+0.2.0, not published. 0.1.0 asked the question of each item in isolation; that design is in
 the git history. MIT.
