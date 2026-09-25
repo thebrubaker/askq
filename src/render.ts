@@ -43,6 +43,7 @@ export type View = {
   width: number;
   hasText: boolean;
   hasAuthor: boolean;
+  groupOf: Map<number, string>;
 };
 
 export type Target = { entry: Entry } | { block: Block };
@@ -445,6 +446,7 @@ export function buildView({ total, items, roles }: BuildInput): View {
     width,
     hasText: roles.text !== undefined,
     hasAuthor: roles.author !== undefined,
+    groupOf: new Map(live.map((e) => [e.line, threadOf(e)])),
   };
 }
 

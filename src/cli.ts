@@ -7,7 +7,8 @@ import { UsageError } from "./errors";
 import { createClient } from "./gemini";
 import type { Role } from "./roles";
 import { splitTerms } from "./terms";
-import { MAX_ITEMS, run, VERSION } from "./run";
+import { MAX_ITEMS, OVERVIEW_MODEL, run, VERSION } from "./run";
+import { CHUNK_ABOVE, overlapFor, WINDOW_SIZE } from "./windows";
 
 export const DEFAULT_MODEL = "gemini-3.8-flash";
 const DEFAULT_MAX_COST = 1.0;
@@ -62,8 +63,17 @@ Options
   --print-prompt    print the exact prompt and exit, calling nothing
   --help, --version
 
+Advanced
+  --window N        judge in windows of N items, overlapping by N/4, at any size; without it
+                    askq uses windows of ${WINDOW_SIZE} only above ${CHUNK_ABOVE} items
+
 Limits
-  One call per run: over ${MAX_ITEMS} items (posts plus referenced posts) askq refuses, naming the cap.
+  Up to ${CHUNK_ABOVE} items (posts plus referenced posts), one call sees them all. Above that, askq judges
+  them in windows of ${WINDOW_SIZE} that overlap by ${overlapFor(WINDOW_SIZE)}, each window seeing only its own items and the
+  posts they answer or quote; an overview pass over every item (${OVERVIEW_MODEL}) names the
+  subject's own accounts and the context's terms, and a last call writes the leads. An item judged
+  in two windows keeps the higher verdict, so the maybe list runs longer than one call's would.
+  Over ${MAX_ITEMS.toLocaleString("en-US")} items askq refuses, naming the cap.
 
 Exit codes
   0    every item has a verdict
@@ -140,6 +150,7 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         "max-cost": { type: "string" },
         yes: { type: "boolean" },
         "print-prompt": { type: "boolean" },
+        window: { type: "string" },
         help: { type: "boolean" },
         version: { type: "boolean" },
       },
@@ -198,6 +209,16 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     if (values["reply-to"] !== undefined) flags.replyTo = values["reply-to"];
     if (values.quote !== undefined) flags.quote = values.quote;
 
+    let window: number | undefined;
+    if (values.window !== undefined) {
+      window = Number(values.window);
+      if (!Number.isInteger(window) || window < 4 || window > CHUNK_ABOVE) {
+        throw new UsageError(
+          `--window must be a whole number of items from 4 to ${CHUNK_ABOVE}, got: ${values.window}`,
+        );
+      }
+    }
+
     const model = values.model ?? DEFAULT_MODEL;
     const printPrompt = values["print-prompt"] === true;
     const apiKey = process.env.GEMINI_API_KEY;
@@ -234,6 +255,7 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         yes: values.yes === true,
         printPrompt,
         watch: (values.watch ?? []).flatMap(splitTerms),
+        window,
       },
       {
         client: () =>
@@ -241,6 +263,12 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
             apiKey: apiKey ?? "",
             model,
             onRetry: (reason) => stderr(`askq: retrying: ${reason}`),
+          }),
+        overviewClient: () =>
+          createClient({
+            apiKey: apiKey ?? "",
+            model: OVERVIEW_MODEL,
+            onRetry: (reason) => stderr(`askq: retrying the overview: ${reason}`),
           }),
         rollupOut,
         recordsOut,

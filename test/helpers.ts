@@ -10,7 +10,8 @@ export function pointersIn(prompt: string): string[] {
     prompt,
   );
   if (scoped) return scoped[1]!.trim().split(/\s+/);
-  return [...prompt.matchAll(/^\[([iq]\d+)\]/gm)].map((m) => m[1]!);
+  const judged = prompt.replace(/<context count="\d+">[\s\S]*?<\/context>/, "");
+  return [...judged.matchAll(/^\[([iq]\d+)\]/gm)].map((m) => m[1]!);
 }
 
 export type Answer = string | ((prompt: string, call: number) => string | CallResult);

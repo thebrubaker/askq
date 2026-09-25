@@ -24,7 +24,7 @@ describe("guards that refuse before anything is sent", () => {
     expect(r.prompts).toHaveLength(0);
     const said = r.notices.join("\n");
     expect(said).toContain(
-      "12 items to judge is over the 10 one call can safely handle. Nothing was sent.",
+      "12 items to judge is over the 10 one run can safely handle. Nothing was sent.",
     );
     expect(said).toContain("never judged");
     expect(said).toContain("By time, at the midpoint: jq -c 'select(.created_at < \"2026-01-0");

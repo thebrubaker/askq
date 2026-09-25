@@ -59,6 +59,7 @@ export function liftOwn(
   judged: Map<string, Judgement>,
   view: View,
   own: readonly string[],
+  namedBy: (account: string) => string = () => "the overview",
 ): string[] {
   const accounts = new Set(own.map(handleKey).filter(Boolean));
   if (accounts.size === 0) return [];
@@ -69,14 +70,14 @@ export function liftOwn(
     if (!author || !accounts.has(handleKey(author))) continue;
     j.verdict = "maybe";
     j.notes.push(
-      `by ${author}, an account the overview names as the subject's own; askq lifted it to maybe`,
+      `by ${author}, an account ${namedBy(handleKey(author))} names as the subject's own; askq lifted it to maybe`,
     );
     lifted.push(pointer);
   }
   return lifted;
 }
 
-export type Repeat = { reason: string; pointers: string[] };
+export type Repeat = { reason: string; pointers: string[]; window?: number };
 
 export function repeatedReasons(
   judged: Map<string, Judgement>,

@@ -12,6 +12,20 @@ export const LINE_LIST_CAP = 20;
 export const TERM_SKIP_LIST_CAP = 10;
 export const AUTHOR_COLLAPSE = 3;
 
+export type ChunkInfo = {
+  why: "flag" | "items" | "tokens";
+  windows: number;
+  size: number;
+  overlap: number;
+  twice: number;
+  disagreed: number;
+  retried: number[];
+  failed: { window: number; reason: string }[];
+  overviewFailed: string | undefined;
+  leadsFailed: string | undefined;
+  ownFrom: { handle: string; from: string[] }[];
+};
+
 export type RollupInput = {
   view: View;
   model: string;
@@ -38,7 +52,27 @@ export type RollupInput = {
   badLines: number;
   interrupted: boolean;
   aborted: string | undefined;
+  chunk?: ChunkInfo | undefined;
 };
+
+const CHUNK_WHY = {
+  flag: (c: ChunkInfo) => `--window ${c.size} asked for windows`,
+  items: () => "over 400 items",
+  tokens: () => "too long for one call",
+};
+
+function chunkLine(c: ChunkInfo): string {
+  return (
+    `chunked: ${CHUNK_WHY[c.why](c)}, so judged in ${c.windows} windows of up to ${c.size} items that overlap by ${c.overlap}, ` +
+    `not in one call. ${c.twice} items were judged twice and kept the higher verdict (${c.disagreed} disagreed). ` +
+    "Expect a longer maybe list than one call would give."
+  );
+}
+
+function ownList(input: RollupInput): string {
+  if (!input.chunk) return input.own.map(at).join(" ");
+  return input.chunk.ownFrom.map((o) => `${at(o.handle)} (${o.from.join(", ")})`).join(" ");
+}
 
 const lineOf = (pointer: string) => Number(pointer.slice(1));
 
@@ -231,6 +265,7 @@ export function rollup(input: RollupInput): string[] {
       `${(input.ms / 1000).toFixed(1)}s · ${input.tokensIn.toLocaleString("en-US")} in + ` +
       `${input.tokensOut.toLocaleString("en-US")} out tokens${cost}`,
   );
+  if (input.chunk) w(chunkLine(input.chunk));
   w(
     file === "(stdout)"
       ? "records: on stdout (--out -); set R to the file you saved them in, and the commands below read it"
@@ -254,9 +289,23 @@ export function rollup(input: RollupInput): string[] {
       `${input.blockErrors.size} referenced posts got no verdict: ${[...input.blockErrors.keys()].map((p) => pointerLabel(view, p)).join("; ")}.`,
     );
   }
+  for (const f of input.chunk?.failed ?? []) {
+    warnings.push(
+      `window ${f.window} got no answer, even when sent again: ${f.reason}. Its items that no other window judged carry askq_error.`,
+    );
+  }
+  if (input.chunk?.overviewFailed) {
+    warnings.push(
+      `the overview call failed (${input.chunk.overviewFailed}): the subject's own accounts come from the windows alone, ` +
+        "and the terms block has only --watch terms.",
+    );
+  }
+  if (input.chunk?.leadsFailed) {
+    warnings.push(`the leads call failed (${input.chunk.leadsFailed}), so there are no leads.`);
+  }
   for (const r of input.repeats) {
     warnings.push(
-      `${r.pointers.length} items share the reason "${r.reason}": the model may have judged them as a group, not ` +
+      `${r.pointers.length} items${r.window ? ` in window ${r.window}` : ""} share the reason "${r.reason}": the model may have judged them as a group, not ` +
         `one by one. Read a few: ${r.pointers
           .slice(0, LINE_LIST_CAP)
           .map((p) => pointerLabel(view, p))
@@ -355,6 +404,15 @@ export function rollup(input: RollupInput): string[] {
   const parts = [
     `${judgedLines}/${view.total} lines judged (${modelLines} by the model, ${view.empties.length} empty, skipped by askq)`,
   ];
+  if (input.chunk) {
+    const c = input.chunk;
+    parts.push(
+      `${c.windows} windows` +
+        (c.retried.length
+          ? `, window${c.retried.length === 1 ? "" : "s"} ${c.retried.join(", ")} sent twice`
+          : ""),
+    );
+  }
   if (view.blocks.length)
     parts.push(
       `${view.blocks.length - input.blockErrors.size}/${view.blocks.length} referenced posts judged`,
@@ -373,13 +431,17 @@ export function rollup(input: RollupInput): string[] {
   const lifted = [
     input.lifts.fragments.length ? `${input.lifts.fragments.length} skipped fragments` : "",
     input.lifts.own.length
-      ? `${input.lifts.own.length} skipped posts by ${input.own.map(at).join(" ")}, named in the overview as the subject's own`
+      ? input.chunk
+        ? `${input.lifts.own.length} skipped posts by ${ownList(input)}, named as the subject's own`
+        : `${input.lifts.own.length} skipped posts by ${input.own.map(at).join(" ")}, named in the overview as the subject's own`
       : "",
   ].filter(Boolean);
   if (lifted.length) parts.push(`lifted to maybe: ${lifted.join("; ")}`);
   else if (input.own.length)
     parts.push(
-      `the subject's own accounts, per the overview: ${input.own.map(at).join(" ")} (none of their posts skipped)`,
+      input.chunk
+        ? `the subject's own accounts: ${ownList(input)} (none of their posts skipped)`
+        : `the subject's own accounts, per the overview: ${input.own.map(at).join(" ")} (none of their posts skipped)`,
     );
   w(`checks: ${parts.join(" · ")}`);
   w(`next: jq -c 'select(.verdict=="read")' ${RECORDS_REF}`);

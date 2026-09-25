@@ -39,7 +39,7 @@ function verdictLine(raw: string): VerdictLine | undefined {
   return { pointer: m[1]!.toLowerCase(), verdict, tag: tag.toLowerCase(), reason };
 }
 
-function handles(s: string): string[] {
+export function handles(s: string): string[] {
   if (/^\s*(none|n\/a|-)\s*\.?\s*$/i.test(s)) return [];
   return s
     .split(/[,;\s]+/)
@@ -96,3 +96,34 @@ export function parseResponse(text: string): Parsed {
   }
   return out;
 }
+
+export type Overview = { own: string[]; named: string[] };
+
+export function parseOverview(text: string): Overview {
+  const out: Overview = { own: [], named: [] };
+  for (const raw of text.split("\n")) {
+    const bare = unmark(raw)
+      .replace(/^[#\s>*-]+/, "")
+      .trim();
+    const kv = /^(own|named)\s*:\s*(.*)$/i.exec(bare);
+    if (!kv) continue;
+    if (kv[1]!.toLowerCase() === "own") out.own = handles(kv[2]!);
+    else out.named = splitTerms(kv[2]!);
+  }
+  return out;
+}
+
+export function parseLeads(text: string): Claim[] {
+  const headed = rowsHaveSummary(text) ? text : `SUMMARY\n${text}`;
+  return parseResponse(headed).summary;
+}
+
+const rowsHaveSummary = (text: string) =>
+  text.split("\n").some(
+    (r) =>
+      HEADER.exec(
+        unmark(r)
+          .replace(/^[#\s]+/, "")
+          .trim(),
+      )?.[1]?.toUpperCase() === "SUMMARY",
+  );
