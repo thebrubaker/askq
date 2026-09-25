@@ -1,52 +1,58 @@
-import type { Cache, CacheEntry } from "../src/cache";
 import type { CallResult, Client } from "../src/gemini";
-import type { RunDeps } from "../src/runner";
+import { run, type RunConfig } from "../src/run";
 
-export function clientFrom(fn: (prompt: string, index: number) => unknown): Client {
-  let index = 0;
+export function pointersIn(prompt: string): string[] {
+  const scoped = /One line for each of these \d+ pointers only, in this order: ([^.]+)\./.exec(
+    prompt,
+  );
+  if (scoped) return scoped[1]!.trim().split(/\s+/);
+  return [...prompt.matchAll(/^\[([iq]\d+)\]/gm)].map((m) => m[1]!);
+}
+
+export type Answer = string | ((prompt: string, call: number) => string | CallResult);
+
+export function ok(text: string): CallResult {
   return {
-    call: async (prompt) => {
-      const result = await fn(prompt, index++);
-      return result as CallResult;
-    },
+    ok: true,
+    text,
+    finishReason: "STOP",
+    usage: { in: 1000, out: 100, thoughts: 0 },
+    attempts: 1,
+    ms: 5,
   };
 }
 
-export function ok(answers: Record<string, unknown>, tokens = { in: 10, out: 5 }): CallResult {
-  return { ok: true, answers, usage: tokens, attempts: 1 };
-}
-
-export function itemFailure(reason: string): CallResult {
-  return { ok: false, kind: "item", reason, attempts: 4 };
-}
-
-export function fatal(reason: string): CallResult {
-  return { ok: false, kind: "fatal", reason, attempts: 1 };
-}
-
-export type Captured = {
-  out: string[];
-  err: string[];
-  deps: RunDeps;
-};
-
-export function capture(client: Client): Captured {
-  const out: string[] = [];
-  const err: string[] = [];
-  let clock = 0;
-  return {
-    out,
-    err,
-    deps: {
-      client,
-      stdout: (line) => {
-        out.push(line);
-      },
-      stderr: (line) => {
-        err.push(line);
-      },
-      now: () => (clock += 1000),
+export function fakeClient(answer: Answer, model = "gemini-3.8-flash") {
+  const prompts: string[] = [];
+  const client: Client = {
+    model,
+    thinking: { thinkingBudget: 0 },
+    async call(prompt) {
+      prompts.push(prompt);
+      const out = typeof answer === "string" ? answer : answer(prompt, prompts.length - 1);
+      return typeof out === "string" ? ok(out) : out;
     },
+  };
+  return { client, prompts };
+}
+
+export function answerAll(
+  verdictOf: (pointer: string) => string = () => "r note: synthetic reason",
+  extra: { own?: string; summary?: string[] } = {},
+) {
+  return (prompt: string) => {
+    const lines = pointersIn(prompt).map((p) => `${p} ${verdictOf(p)}`);
+    return [
+      "OVERVIEW",
+      `own: ${extra.own ?? "none"}`,
+      "threads: ",
+      "",
+      "ITEMS",
+      ...lines,
+      "",
+      "SUMMARY",
+      ...(extra.summary ?? ["- a synthetic claim [i001]"]),
+    ].join("\n");
   };
 }
 
@@ -54,21 +60,70 @@ export function jsonl(items: Record<string, unknown>[]): string {
   return items.map((i) => JSON.stringify(i)).join("\n") + "\n";
 }
 
-export function memoryCache(): { get: Cache["get"]; put: Cache["put"]; size: () => number } {
-  const store = new Map<string, CacheEntry>();
-  return {
-    get: (key) => store.get(key),
-    put: (key, entry) => {
-      store.set(key, entry);
+export type Ran = {
+  code: number;
+  rollup: string[];
+  records: Record<string, unknown>[];
+  notices: string[];
+  prompts: string[];
+  text: string;
+};
+
+export async function runWith(
+  input: string,
+  answer: Answer,
+  cfg: Partial<RunConfig> = {},
+): Promise<Ran> {
+  const { client, prompts } = fakeClient(answer);
+  const rollupLines: string[] = [];
+  const notices: string[] = [];
+  let written: string[] = [];
+  const code = await run(
+    input,
+    {
+      ask: { question: "which should I read?" },
+      flags: {},
+      autodetect: true,
+      model: "gemini-3.8-flash",
+      maxCost: 1,
+      yes: false,
+      printPrompt: false,
+      ...cfg,
     },
-    size: () => store.size,
+    {
+      client: () => client,
+      rollupOut: (l) => rollupLines.push(l),
+      recordsOut: { path: "/tmp/askq-test/records.jsonl", write: (lines) => (written = lines) },
+      notice: (l) => notices.push(l),
+      now: (() => {
+        let t = 0;
+        return () => (t += 1000);
+      })(),
+    },
+  );
+  return {
+    code,
+    rollup: rollupLines,
+    records: written.map((l) => JSON.parse(l) as Record<string, unknown>),
+    notices,
+    prompts,
+    text: rollupLines.join("\n"),
   };
 }
 
-/** Synthetic items only: no scraped third-party text may enter this repository. */
-export function syntheticItems(n: number): Record<string, unknown>[] {
+export const lineRecords = (r: Ran) => r.records.filter((x) => typeof x.askq_line === "number");
+
+/** Synthetic posts only: no scraped third-party text may enter this repository. */
+export function posts(
+  n: number,
+  extra: (i: number) => Record<string, unknown> = () => ({}),
+): Record<string, unknown>[] {
   return Array.from({ length: n }, (_, i) => ({
-    id: i + 1,
-    txt: `synthetic item ${i + 1}: shipped a ${i + 1}% improvement in build time`,
+    id: String(1000 + i),
+    url: `https://example.com/p/${1000 + i}`,
+    author: `@user${i + 1}`,
+    text: `synthetic post ${i + 1}: I shipped a demo that cut render time by ${i + 3}%`,
+    created_at: `2026-01-0${(i % 9) + 1}T10:00:00.000Z`,
+    ...extra(i),
   }));
 }

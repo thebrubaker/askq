@@ -1,90 +1,91 @@
+import { randomBytes } from "node:crypto";
+import { fstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { defaultCacheDir, openCache } from "./cache";
-import { extract, parsePath } from "./field";
+import { UsageError } from "./errors";
 import { createClient } from "./gemini";
-import { buildPrompt } from "./prompt";
-import { parseQuestions, type QuestionKind, type QuestionSpec, UsageError } from "./questions";
-import { unpairedScores } from "./review";
-import { createThrottle, run, splitLines } from "./runner";
+import type { Role } from "./roles";
+import { MAX_ITEMS, run, VERSION } from "./run";
 
-const VERSION = "0.1.0";
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const DEFAULT_CONCURRENCY = 30;
+export const DEFAULT_MODEL = "gemini-3.8-flash";
 const DEFAULT_MAX_COST = 1.0;
 
-export const HELP = `askq — ask the same question of every item in a dataset
+export const HELP = `askq — ask one question of a whole dataset, get back what to read
 
-  You have N items and the same question about each. askq asks a model about one item at a
-  time and gives you back a score per item, so you can read from the top instead of reading
-  everything. The loop is code: every item is seen, and no item is skipped silently.
+  You have a pile of posts, messages or records and one question about them. askq hands the
+  whole pile to one model call, gets a verdict for every item (read, maybe or skip, with a tag
+  and a short reason), checks in code that every item came back, and prints a roll-up: leads,
+  the read list, the maybe list, and five of the skipped items so you can check it was right to
+  skip them. Every item's verdict goes to a records file the roll-up names.
 
-  askq decides what you read first. It is not the last reader — the answers depend on how
-  you word the question, so the summary shows you a few of the items it ranked low.
+  askq decides what you read first. It is not the last reader.
 
 Usage
-  askq --field <path> --score NAME=QUESTION [more questions] < items.jsonl > out.jsonl
+  askq "QUESTION" [--context TEXT] < items.jsonl
 
-Questions (repeatable, answered in the order declared)
-  --score  NAME=QUESTION            a whole number from 0 to 10; anchor both ends in the
-                                    question text ("0 = …, 10 = …"). This is the one that
-                                    orders your reading.
-  --bool   NAME=QUESTION            true or false, for counting and filtering
-  --choice NAME=a|b|c: QUESTION     one of the listed values, for counting
+  jq -c '.[]' tweets.json | askq "which report hands-on results with a local voice model?" \\
+    --context "tweets from an X search; I care about latency, quality and hardware"
 
-Options
-  --field <path>        which part of each item the model reads: .txt, .user.name,
-                        .items[0].body, or . for the whole item (required)
-  --id <path>           a value from each item to carry into the output as askq_id, so you
-                        can join the answers back to your data (e.g. --id .url)
-  --full                put the whole input item in the output record instead of a pointer
-  --why                 add <name>_why, 15 words or fewer, for every answer
-  --sample <n>          run only the first n items and print them with their answers and
-                        the exact prompt, to check the wording before spending on the rest
-  --model <id>          default ${DEFAULT_MODEL}
-  --concurrency <n>     default ${DEFAULT_CONCURRENCY}
-  --into <key>          nest the answers under one key instead of merging them in
-  --max-cost <usd>      refuse to start if the run is estimated over this; default ${DEFAULT_MAX_COST.toFixed(2)}
-  --yes                 run anyway, past --max-cost
-  --cache <dir>         default \${XDG_CACHE_HOME:-~/.cache}/askq
-  --no-cache            neither read nor write the cache
-  --allow-empty         0 items on stdin is not an error
-  --print-prompt        print the prompt for the first item and exit, calling nothing
-  --help, --version
+Input
+  JSONL, one item per line. Fields are recognised by name, so the known scrape shapes need no
+  flags; the roll-up's roles: line shows what askq used. Name a field to override:
+  --text PATH       the post's text (text, txt, content, body, ...)
+  --author PATH     who wrote it (author, handle, username, ...)
+  --time PATH       when (created_at, createdAt, time, ...)
+  --id PATH         what the roll-up shows to open an item (url, permalink, else id)
+  --reply-to PATH   the id of the post it replies to (reply_to_id, inReplyToId, parent_id, ...)
+  --quote PATH      the text of the post it quotes (quoted_text, quotedText, quoted, ...)
+  --no-roles        recognise nothing; show the model every field as key: value
+  Also recognised: quoted_author / quotedHandle, quotedId, reply_to_author / inReplyToHandle,
+  thread_root_id / conversation_id, media, isRT.
 
-Exit codes
-  0  every item answered
-  1  coverage incomplete: at least one item failed (each one is named on stderr and
-     carries askq_error in the output)
-  2  usage or configuration error, or the run aborted because the API rejected the
-     request in a way that would repeat for every item
-  3  estimated over --max-cost; nothing was sent
-  130 interrupted
+  A reply points to its parent when the parent is in the data. A quoted or reposted post is shown
+  once and pointed to. An item with no text, no media and no quote is skipped without asking the
+  model; a post that is only an image or a video is still judged.
 
 Output
-  One JSONL line per input line, in input order, carrying askq_line (the 1-based input line),
-  askq_id when --id is given, and one key per question. A failed item still gets a line, with
-  askq_error, so wc -l on the input and the output must match.
+  stdout      the roll-up: bounded, meant to be read
+  records     one JSON line per input line (askq_line, askq_id, verdict, tag, reason, item), then
+              one per referenced post (askq_ref); first line is the run (askq_run). Default path is
+              under ${join(tmpdir(), "askq")}; --out FILE to choose.
+  --out -     records to stdout and the roll-up to stderr, for pipelines
 
-Example
-  jq -c '.[]' posts.json | askq \\
-    --field .text --id .url \\
-    --score reports_measurement='0 = no numbers at all, 10 = an explicit measurement or benchmark result' \\
-    > out.jsonl
+Options
+  --context TEXT    what you already know and what you care about, in your own words
+  --model ID        default ${DEFAULT_MODEL}
+  --max-cost USD    refuse to start if the run is estimated over this; default ${DEFAULT_MAX_COST.toFixed(2)}
+  --yes             run anyway, past --max-cost
+  --print-prompt    print the exact prompt and exit, calling nothing
+  --help, --version
 
-  # then read from the top (the select skips items that failed and so have no score)
-  jq -sc 'map(select(.reports_measurement!=null))|sort_by(-.reports_measurement)|.[:20][]' out.jsonl
+Limits
+  One call per run: over ${MAX_ITEMS} items (posts plus referenced posts) askq refuses, naming the cap.
 
-  A score is the model's graded answer to the question you wrote. Use it to decide what to
-  read first; it is not a probability and not a confidence.
-
-  Naming a --score <name>_score after a --bool <name> lets askq compare the two answers and
-  mark the items where they disagree, or where the score lands mid-range, with askq_review:
-
-    jq -c 'select(.askq_review)' out.jsonl
+Exit codes
+  0    every item has a verdict
+  1    coverage incomplete: some items have no verdict (askq_error in the records, named in the roll-up)
+  2    usage error, over the item cap, or the API refused the request in a way that would repeat
+  3    estimated over --max-cost; nothing was sent
+  130  interrupted
 `;
 
+const V1_FLAGS = new Set([
+  "score",
+  "bool",
+  "choice",
+  "field",
+  "why",
+  "full",
+  "into",
+  "sample",
+  "concurrency",
+  "cache",
+  "no-cache",
+  "allow-empty",
+]);
+
 function readStdin(): Promise<string> {
-  // Without this, askq run with no pipe waits on a terminal that will never send anything.
   if (process.stdin.isTTY) {
     throw new UsageError("no input on stdin: pipe JSONL in, one item per line");
   }
@@ -97,10 +98,17 @@ function readStdin(): Promise<string> {
   });
 }
 
-function writeLine(stream: NodeJS.WriteStream, line: string): Promise<void> | void {
-  const written = stream.write(line + "\n");
-  if (written) return;
-  return new Promise<void>((resolve) => stream.once("drain", () => resolve()));
+function stdoutIsFile(): boolean {
+  try {
+    return fstatSync(1).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function defaultRecordsPath(): string {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  return join(tmpdir(), "askq", `${stamp}-${randomBytes(2).toString("hex")}.jsonl`);
 }
 
 export async function main(argv: string[], abort?: AbortSignal): Promise<number> {
@@ -113,38 +121,41 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     parsed = parseArgs({
       args: argv,
       options: {
-        field: { type: "string" },
-        bool: { type: "string", multiple: true },
-        choice: { type: "string", multiple: true },
-        score: { type: "string", multiple: true },
-        model: { type: "string" },
-        concurrency: { type: "string" },
-        into: { type: "string" },
+        context: { type: "string" },
         id: { type: "string" },
-        full: { type: "boolean" },
-        why: { type: "boolean" },
-        sample: { type: "string" },
+        text: { type: "string" },
+        author: { type: "string" },
+        time: { type: "string" },
+        "reply-to": { type: "string" },
+        quote: { type: "string" },
+        "no-roles": { type: "boolean" },
+        out: { type: "string" },
+        model: { type: "string" },
         "max-cost": { type: "string" },
         yes: { type: "boolean" },
-        cache: { type: "string" },
-        "no-cache": { type: "boolean" },
-        "allow-empty": { type: "boolean" },
         "print-prompt": { type: "boolean" },
         help: { type: "boolean" },
         version: { type: "boolean" },
       },
       strict: true,
-      allowPositionals: false,
-      tokens: true,
+      allowPositionals: true,
     });
   } catch (e) {
-    stderr(`askq: ${(e as Error).message}`);
-    stderr("askq: run askq --help for the flags");
+    const message = (e as Error).message;
+    const flag = /'--?([\w-]+)/.exec(message)?.[1];
+    stderr(`askq: ${message}`);
+    if (flag && V1_FLAGS.has(flag)) {
+      stderr(
+        `askq: --${flag} was askq 0.1. askq ${VERSION} takes one question as its argument and judges the whole ` +
+          `dataset at once: askq "which of these should I read for X?" < items.jsonl`,
+      );
+    } else {
+      stderr("askq: run askq --help for the flags");
+    }
     return 2;
   }
 
-  const { values, tokens } = parsed;
-
+  const { values, positionals } = parsed;
   if (values.help) {
     process.stdout.write(HELP);
     return 0;
@@ -155,37 +166,15 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
   }
 
   try {
-    const specs: QuestionSpec[] = [];
-    for (const token of tokens) {
-      if (token.kind !== "option") continue;
-      if (token.name === "bool" || token.name === "choice" || token.name === "score") {
-        specs.push({ kind: token.name as QuestionKind, spec: token.value ?? "" });
-      }
+    if (positionals.length === 0)
+      throw new UsageError('no question: askq "QUESTION" < items.jsonl');
+    if (positionals.length > 1) {
+      throw new UsageError(
+        `one question per run, got ${positionals.length} arguments (quote the question; run askq once per question)`,
+      );
     }
-
-    const questions = parseQuestions(specs);
-
-    const field = values.field;
-    if (field === undefined) throw new UsageError("--field is required");
-
-    const concurrency =
-      values.concurrency === undefined ? DEFAULT_CONCURRENCY : Number(values.concurrency);
-    if (!Number.isInteger(concurrency) || concurrency < 1) {
-      throw new UsageError(`--concurrency must be a positive integer, got: ${values.concurrency}`);
-    }
-
-    const model = values.model ?? DEFAULT_MODEL;
-    const why = values.why === true;
-
-    const positiveInt = (raw: string | undefined, flag: string): number | undefined => {
-      if (raw === undefined) return undefined;
-      const n = Number(raw);
-      if (!Number.isInteger(n) || n < 1) {
-        throw new UsageError(`${flag} must be a positive integer, got: ${raw}`);
-      }
-      return n;
-    };
-    const sample = positiveInt(values.sample, "--sample");
+    const question = positionals[0]!.trim();
+    if (!question) throw new UsageError("the question is empty");
 
     let maxCost: number | undefined = DEFAULT_MAX_COST;
     if (values["max-cost"] !== undefined) {
@@ -195,94 +184,65 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
       }
     }
 
-    if (values["no-cache"] && values.cache !== undefined) {
-      throw new UsageError("--cache and --no-cache cannot both be given");
-    }
+    const flags: Partial<Record<Role, string>> = {};
+    if (values.id !== undefined) flags.id = values.id;
+    if (values.text !== undefined) flags.text = values.text;
+    if (values.author !== undefined) flags.author = values.author;
+    if (values.time !== undefined) flags.time = values.time;
+    if (values["reply-to"] !== undefined) flags.replyTo = values["reply-to"];
+    if (values.quote !== undefined) flags.quote = values.quote;
 
-    for (const name of unpairedScores(questions)) {
-      const base = name.slice(0, -"_score".length);
-      stderr(
-        `askq: warning: --score ${name} has no matching --bool or --choice ${base}; ` +
-          `no agreement check for it`,
-      );
-    }
-    for (const q of questions) {
-      if (q.kind !== "score") continue;
-      if (q.text.includes("0") && q.text.includes("10")) continue;
-      stderr(
-        `askq: warning: score question '${q.name}' does not anchor its endpoints; ` +
-          `scores are often degenerate without "0 = … , 10 = …"`,
-      );
-    }
-
-    if (values["print-prompt"]) {
-      const lines = process.stdin.isTTY ? [] : splitLines(await readStdin());
-      const first = lines[0];
-      let text = "<the text your --field selects>";
-      if (first !== undefined && first.trim().length > 0) {
-        try {
-          const item = JSON.parse(first) as unknown;
-          const got = extract(item, field, parsePath(field));
-          if (got.ok) text = got.text;
-        } catch {
-          // fall through to the placeholder: --print-prompt must never need valid input
-        }
-      }
-      stderr(buildPrompt(text, questions, why));
-      return 0;
-    }
-
+    const model = values.model ?? DEFAULT_MODEL;
+    const printPrompt = values["print-prompt"] === true;
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new UsageError("GEMINI_API_KEY is not set");
+    if (!printPrompt && !apiKey) throw new UsageError("GEMINI_API_KEY is not set");
 
     const input = await readStdin();
-    const lineCount = splitLines(input).length;
-    if (lineCount === 0) {
-      if (values["allow-empty"]) {
-        stderr("askq: 0 items");
-        return 0;
-      }
-      throw new UsageError("no items on stdin (pass --allow-empty if that is expected)");
-    }
 
-    const throttle = createThrottle(concurrency);
-    const client = createClient({
-      apiKey,
-      model,
-      onWarn: (message) => stderr(`askq: warning: ${message}`),
-      onRateLimit: () => {
-        const capacity = throttle.reduce();
-        stderr(`askq: warning: rate limited; concurrency reduced to ${capacity}`);
+    const toStdout = values.out === "-";
+    const path = toStdout ? "(stdout)" : (values.out ?? defaultRecordsPath());
+    const rollupOut = toStdout ? stderr : (line: string) => void process.stdout.write(line + "\n");
+    const recordsOut = {
+      path,
+      write: (lines: string[]) => {
+        const body = lines.join("\n") + "\n";
+        if (toStdout) {
+          process.stdout.write(body);
+          return;
+        }
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, body);
       },
-    });
+    };
 
-    const cache = values["no-cache"] ? undefined : openCache(values.cache ?? defaultCacheDir());
-
-    const result = await run(
+    const code = await run(
       input,
       {
-        questions,
-        field,
+        ask: { question, context: values.context },
+        flags,
+        autodetect: values["no-roles"] !== true,
         model,
-        concurrency,
-        why,
-        into: values.into,
-        id: values.id,
-        full: values.full === true,
-        sample,
-        cache,
         maxCost,
         yes: values.yes === true,
-        throttle,
+        printPrompt,
       },
       {
-        client,
-        stdout: (line) => writeLine(process.stdout, line),
-        stderr,
+        client: () =>
+          createClient({
+            apiKey: apiKey ?? "",
+            model,
+            onRetry: (reason) => stderr(`askq: retrying: ${reason}`),
+          }),
+        rollupOut,
+        recordsOut,
+        notice: stderr,
         abort,
       },
     );
-    return result.exitCode;
+    if (!toStdout && !printPrompt && stdoutIsFile() && code !== 2 && code !== 3) {
+      stderr(`askq: stdout is a file, so the roll-up went there; the records are in ${path}`);
+    }
+    return code;
   } catch (e) {
     if (e instanceof UsageError) {
       stderr(`askq: ${e.message}`);

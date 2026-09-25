@@ -1,0 +1,256 @@
+import { createHash } from "node:crypto";
+import type { Judgement, Repeat } from "./checks";
+import { formatUsd } from "./cost";
+import type { Claim } from "./parse";
+import { at, type Block, type View } from "./render";
+
+export const READ_CAP = 40;
+export const MAYBE_CAP = 25;
+export const SPOT_CHECK = 5;
+export const LINE_LIST_CAP = 20;
+
+export type RollupInput = {
+  view: View;
+  model: string;
+  rolesLine: string;
+  judged: Map<string, Judgement>;
+  errors: Map<number, string>;
+  blockErrors: Map<string, string>;
+  summary: Claim[];
+  own: string[];
+  calls: number;
+  ms: number;
+  tokensIn: number;
+  tokensOut: number;
+  usd: number | undefined;
+  repaired: string[];
+  duplicates: string[];
+  unknown: string[];
+  unparsed: number;
+  lifts: { fragments: string[]; own: string[] };
+  repeats: Repeat[];
+  file: string;
+  badLines: number;
+  interrupted: boolean;
+  aborted: string | undefined;
+};
+
+const lineOf = (pointer: string) => Number(pointer.slice(1));
+
+function list(lines: number[], cap = LINE_LIST_CAP): string {
+  const shown = lines.slice(0, cap).join(" ");
+  return lines.length > cap ? `${shown} +${lines.length - cap}` : shown;
+}
+
+function blockLabel(b: Block): string {
+  const verb = b.kind === "quote" ? "quoted by" : "reposted by";
+  return b.lines.length === 1
+    ? `${verb} ${b.lines[0]}`
+    : `${verb} ${b.lines.length}: ${list(b.lines, 6)}`;
+}
+
+function row(input: RollupInput, pointer: string, j: Judgement | undefined): string[] {
+  const { view } = input;
+  const said = j ? `${j.tag || "?"}${j.reason ? `: ${j.reason}` : ""}` : "";
+  const lifted = j?.notes.some((n) => n.includes("lifted")) ? "  (lifted to maybe by askq)" : "";
+  if (pointer.startsWith("q")) {
+    const b = view.blocks.find((x) => x.pointer === pointer)!;
+    const via = view.entries.get(b.lines[0]!);
+    const open = via?.id ? `via ${via.id}` : `via line ${b.lines[0]}`;
+    return [
+      `  [${blockLabel(b)}] ${b.author ?? "author not in the data"} · ${said}${lifted}`,
+      `      ${open} · "${snip(b.text)}"`,
+    ];
+  }
+  const e = view.entries.get(lineOf(pointer))!;
+  const who = e.author ? at(e.author) : "—";
+  return [
+    `  [${e.line}] ${who} · ${said}${lifted}`,
+    `      ${e.id ?? `line ${e.line}`} · "${e.snippet}"`,
+  ];
+}
+
+function snip(s: string, max = 110): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+}
+
+function pointerLabel(view: View, pointer: string): string {
+  if (!pointer.startsWith("q")) return String(lineOf(pointer));
+  const b = view.blocks.find((x) => x.pointer === pointer);
+  return b ? `the post ${b.kind === "quote" ? "quoted" : "reposted"} by ${b.lines[0]}` : pointer;
+}
+
+export function displayOrder(view: View): string[] {
+  const after = new Map<number, string[]>();
+  for (const b of view.blocks)
+    after.set(b.lines[0]!, [...(after.get(b.lines[0]!) ?? []), b.pointer]);
+  const out: string[] = [];
+  for (const e of view.sent) out.push(e.pointer, ...(after.get(e.line) ?? []));
+  for (const b of view.blocks) if (!out.includes(b.pointer)) out.push(b.pointer);
+  return out;
+}
+
+function spotCheck(input: RollupInput): string[] {
+  const byTag = new Map<string, string[]>();
+  for (const p of displayOrder(input.view)) {
+    const j = input.judged.get(p);
+    if (j?.verdict !== "skip") continue;
+    byTag.set(j.tag, [...(byTag.get(j.tag) ?? []), p]);
+  }
+  const hash = (p: string) => createHash("sha256").update(`askq-spot-check:${p}`).digest("hex");
+  const queues = [...byTag.values()]
+    .sort((a, b) => b.length - a.length)
+    .map((q) => [...q].sort((a, b) => (hash(a) < hash(b) ? -1 : 1)));
+  const picked: string[] = [];
+  for (let k = 0; picked.length < SPOT_CHECK && queues.some((q) => q.length > k); k++) {
+    for (const q of queues)
+      if (q[k] !== undefined && picked.length < SPOT_CHECK) picked.push(q[k]!);
+  }
+  const rank = new Map(displayOrder(input.view).map((p, i) => [p, i]));
+  return picked.sort((a, b) => rank.get(a)! - rank.get(b)!);
+}
+
+export function rollup(input: RollupInput): string[] {
+  const { view, judged } = input;
+  const out: string[] = [];
+  const w = (s = "") => out.push(s);
+  const file = input.file;
+
+  const shown = displayOrder(view);
+  const count = (v: string) => shown.filter((p) => judged.get(p)?.verdict === v);
+  const read = count("read");
+  const maybe = count("maybe");
+  const skipped = count("skip");
+
+  const cost = input.usd === undefined ? "" : ` · ~${formatUsd(input.usd)}`;
+  w(
+    `askq · ${view.total} items · ${input.model} · ${input.calls} call${input.calls === 1 ? "" : "s"} · ` +
+      `${(input.ms / 1000).toFixed(1)}s · ${input.tokensIn.toLocaleString("en-US")} in + ` +
+      `${input.tokensOut.toLocaleString("en-US")} out tokens${cost}`,
+  );
+  w(`records: ${file}`);
+  w(
+    `         every item with its verdict, tag, reason and the item itself; the lists below are drawn from it`,
+  );
+  w(`roles: ${input.rolesLine}`);
+
+  const warnings: string[] = [];
+  if (input.aborted)
+    warnings.push(`the run stopped: ${input.aborted}. Items without a verdict carry askq_error.`);
+  if (input.interrupted) warnings.push("interrupted: items without a verdict carry askq_error.");
+  const missing = [...input.errors.keys()].sort((a, b) => a - b);
+  if (missing.length > 0) {
+    warnings.push(
+      `coverage incomplete: ${missing.length} of ${view.total} lines have no verdict (lines ${list(missing)}); ` +
+        `each carries askq_error in the records. Read them yourself.`,
+    );
+  }
+  if (input.blockErrors.size > 0) {
+    warnings.push(
+      `${input.blockErrors.size} referenced posts got no verdict: ${[...input.blockErrors.keys()].map((p) => pointerLabel(view, p)).join("; ")}.`,
+    );
+  }
+  for (const r of input.repeats) {
+    warnings.push(
+      `${r.pointers.length} items share the reason "${r.reason}": the model may have judged them as a group, not ` +
+        `one by one. Read a few: ${r.pointers
+          .slice(0, LINE_LIST_CAP)
+          .map((p) => pointerLabel(view, p))
+          .join(", ")}.`,
+    );
+  }
+  if (!input.aborted && !input.interrupted && judged.size > 0 && read.length === 0) {
+    warnings.push(
+      "nothing was marked read: the question may not match this data. Check the maybe list and the spot-check.",
+    );
+  }
+  if (warnings.length > 0) {
+    w();
+    for (const x of warnings) w(`warning: ${x}`);
+  }
+
+  if (input.summary.length > 0) {
+    w();
+    w(
+      "leads — the model's summary of the set. Leads to verify, not facts: check each against the items it cites.",
+    );
+    for (const c of input.summary) {
+      const cites = c.pointers.length
+        ? `  [${c.pointers.map((p) => pointerLabel(view, p)).join(", ")}]`
+        : "";
+      w(`  - ${c.text}${cites}`);
+    }
+  }
+
+  const section = (title: string, pointers: string[], cap: number, verdict: string) => {
+    w();
+    const refs = pointers.filter((p) => p.startsWith("q")).length;
+    const split = refs ? ` (${pointers.length - refs} posts, ${refs} referenced posts)` : "";
+    w(
+      `${title} — ${pointers.length}${split}${pointers.length > cap ? `, first ${cap} shown` : ""}`,
+    );
+    for (const p of pointers.slice(0, cap)) out.push(...row(input, p, judged.get(p)));
+    if (pointers.length > cap) {
+      w(`  … ${pointers.length - cap} more: jq -c 'select(.verdict=="${verdict}")' ${file}`);
+    }
+  };
+  section("read first", read, READ_CAP, "read");
+  section("then maybe", maybe, MAYBE_CAP, "maybe");
+
+  const spot = spotCheck(input);
+  w();
+  if (spot.length === 0) {
+    w("spot-check — the model skipped nothing.");
+  } else {
+    w(
+      `spot-check — ${spot.length} of the ${skipped.length} items the model skipped, one per tag. ` +
+        "If one of these is what you wanted, the question missed it: reword it and run again.",
+    );
+    for (const p of spot) out.push(...row(input, p, judged.get(p)));
+  }
+
+  w();
+  const judgedLines = view.total - missing.length;
+  const modelLines = view.sent.filter((e) => judged.has(e.pointer)).length;
+  const parts = [
+    `${judgedLines}/${view.total} lines judged (${modelLines} by the model, ${view.empties.length} empty, skipped by askq)`,
+  ];
+  if (view.blocks.length)
+    parts.push(
+      `${view.blocks.length - input.blockErrors.size}/${view.blocks.length} referenced posts judged`,
+    );
+  if (input.repaired.length)
+    parts.push(`${input.repaired.length} re-asked after the first answer missed them`);
+  if (input.duplicates.length)
+    parts.push(`${input.duplicates.length} answered twice (kept the higher)`);
+  if (input.badLines) parts.push(`${input.badLines} lines were not JSON objects`);
+  const most = Math.max(0, ...countReasons(judged));
+  parts.push(
+    input.repeats.length
+      ? `repeated reasons: ${input.repeats.length} flagged`
+      : `no reason repeated on 5+ items (most ${most})`,
+  );
+  const lifted = [
+    input.lifts.fragments.length ? `${input.lifts.fragments.length} skipped fragments` : "",
+    input.lifts.own.length
+      ? `${input.lifts.own.length} skipped posts by ${input.own.map(at).join(" ")}, named in the overview as the subject's own`
+      : "",
+  ].filter(Boolean);
+  if (lifted.length) parts.push(`lifted to maybe: ${lifted.join("; ")}`);
+  else if (input.own.length)
+    parts.push(
+      `the subject's own accounts, per the overview: ${input.own.map(at).join(" ")} (none of their posts skipped)`,
+    );
+  w(`checks: ${parts.join(" · ")}`);
+  w(`next: jq -c 'select(.verdict=="read")' ${file}`);
+  return out;
+}
+
+function countReasons(judged: Map<string, Judgement>): number[] {
+  const counts = new Map<string, number>();
+  for (const j of judged.values()) {
+    if (j.reason) counts.set(j.reason, (counts.get(j.reason) ?? 0) + 1);
+  }
+  return [...counts.values()];
+}

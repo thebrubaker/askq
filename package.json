@@ -1,7 +1,7 @@
 {
   "name": "askq",
-  "version": "0.1.0",
-  "description": "Ask the same question of every item in a dataset. Code runs the loop; a model answers about the one item in front of it.",
+  "version": "0.2.0-dev",
+  "description": "Ask one question of a whole dataset and get back what to read. One model call sees every item; code checks that every item came back.",
   "type": "module",
   "bin": {
     "askq": "bin/askq.mjs"
@@ -39,8 +39,9 @@
     "jsonl",
     "llm",
     "gemini",
-    "classify",
     "triage",
+    "discourse",
+    "twitter",
     "jq",
     "agents"
   ]

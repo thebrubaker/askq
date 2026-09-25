@@ -1,13 +1,13 @@
-import type { ResponseSchema } from "./schema";
-
-export type Usage = { in: number; out: number };
+export type Usage = { in: number; out: number; thoughts: number };
 
 export type CallResult =
-  | { ok: true; answers: Record<string, unknown>; usage: Usage; attempts: number }
-  | { ok: false; kind: "item" | "fatal"; reason: string; attempts: number };
+  | { ok: true; text: string; finishReason: string; usage: Usage; attempts: number; ms: number }
+  | { ok: false; fatal: boolean; reason: string; attempts: number };
 
 export type Client = {
-  call(prompt: string, schema: ResponseSchema): Promise<CallResult>;
+  readonly model: string;
+  readonly thinking: Record<string, unknown> | undefined;
+  call(prompt: string, signal?: AbortSignal): Promise<CallResult>;
 };
 
 export type ClientOptions = {
@@ -16,26 +16,32 @@ export type ClientOptions = {
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
+  now?: () => number;
   maxAttempts?: number;
   baseUrl?: string;
-  onWarn?: (message: string) => void;
-  onRateLimit?: () => void;
+  timeoutMs?: number;
+  maxOutputTokens?: number;
+  onRetry?: (reason: string) => void;
 };
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// Measured 2026-09-18: 3.x rejects thinkingBudget, 2.x rejects thinkingLevel. See
-// .scratch/v1-plan.md §4.2 — a wrong field here is a 400 on every item, not a slow run.
+const THINKING: Record<string, Record<string, unknown>> = {
+  "gemini-3.8-flash": { thinkingBudget: 0 },
+  "gemini-3.5-flash-lite": { thinkingLevel: "minimal" },
+  "gemini-2.5-flash": { thinkingBudget: 0 },
+  "gemini-2.5-flash-lite": { thinkingBudget: 0 },
+};
+
 export function thinkingConfigFor(model: string): Record<string, unknown> | undefined {
-  if (/^gemini-2/.test(model)) return { thinkingBudget: 0 };
-  if (/^gemini-(3|flash|pro)/.test(model)) return { thinkingLevel: "minimal" };
-  return undefined;
+  return THINKING[model];
 }
 
 type Raw =
-  | { kind: "http"; status: number; body: unknown; retryAfterMs?: number }
-  | { kind: "network"; reason: string };
+  | { kind: "http"; status: number; body: unknown; retryAfterMs?: number | undefined }
+  | { kind: "network"; reason: string }
+  | { kind: "aborted" };
 
 function messageOf(body: unknown): string {
   const err = (body as { error?: { message?: unknown } } | null)?.error;
@@ -58,6 +64,27 @@ function retryAfterFrom(headers: Headers, body: unknown): number | undefined {
   return undefined;
 }
 
+function linked(
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`no answer after ${timeoutMs / 1000}s`)),
+    timeoutMs,
+  );
+  const onAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) controller.abort(signal.reason);
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    done: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
 export function createClient(options: ClientOptions): Client {
   const {
     apiKey,
@@ -65,31 +92,34 @@ export function createClient(options: ClientOptions): Client {
     fetchImpl = fetch,
     sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
     random = Math.random,
-    maxAttempts = 4,
+    now = () => Date.now(),
+    maxAttempts = 3,
     baseUrl = DEFAULT_BASE,
-    onWarn = () => {},
-    onRateLimit = () => {},
+    timeoutMs = 300_000,
+    maxOutputTokens = 32_768,
+    onRetry = () => {},
   } = options;
 
-  let thinking = thinkingConfigFor(model);
-  let thinkingWarned = false;
+  const thinking = thinkingConfigFor(model);
   const url = `${baseUrl}/${model}:generateContent`;
 
-  async function post(prompt: string, schema: ResponseSchema): Promise<Raw> {
+  async function post(prompt: string, outer: AbortSignal | undefined): Promise<Raw> {
     const body = {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0,
-        responseMimeType: "application/json",
-        responseSchema: schema,
+        maxOutputTokens,
+        responseMimeType: "text/plain",
         ...(thinking ? { thinkingConfig: thinking } : {}),
       },
     };
+    const { signal, done } = linked(outer, timeoutMs);
     try {
       const res = await fetchImpl(url, {
         method: "POST",
         headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
         body: JSON.stringify(body),
+        signal,
       });
       let parsed: unknown = null;
       try {
@@ -104,113 +134,88 @@ export function createClient(options: ClientOptions): Client {
         retryAfterMs: retryAfterFrom(res.headers, parsed),
       };
     } catch (e) {
+      if (outer?.aborted) return { kind: "aborted" };
+      if (signal.aborted)
+        return { kind: "network", reason: String((signal.reason as Error)?.message ?? "timeout") };
       const cause = (e as { cause?: { code?: string } }).cause?.code;
       return { kind: "network", reason: cause ?? (e as Error).message ?? "network error" };
+    } finally {
+      done();
     }
   }
 
-  function readAnswers(
-    body: unknown,
-  ): { ok: true; answers: Record<string, unknown> } | { ok: false; reason: string } {
+  function readText(body: unknown): { text: string; finishReason: string } {
     const candidate = (body as { candidates?: unknown[] } | null)?.candidates?.[0] as
-      { content?: { parts?: { text?: unknown }[] }; finishReason?: unknown } | undefined;
-    if (!candidate) return { ok: false, reason: "no candidate in the response" };
-    if (candidate.finishReason !== undefined && candidate.finishReason !== "STOP") {
-      return { ok: false, reason: `finishReason ${String(candidate.finishReason)}` };
-    }
-    const text = (candidate.content?.parts ?? [])
+      | { content?: { parts?: { text?: unknown; thought?: unknown }[] }; finishReason?: unknown }
+      | undefined;
+    const text = (candidate?.content?.parts ?? [])
+      .filter((p) => p.thought !== true)
       .map((p) => (typeof p.text === "string" ? p.text : ""))
       .join("");
-    if (text.trim().length === 0) return { ok: false, reason: "empty answer" };
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return { ok: false, reason: "answer was not JSON" };
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return { ok: false, reason: "answer was not a JSON object" };
-    }
-    return { ok: true, answers: parsed as Record<string, unknown> };
+    return { text, finishReason: String(candidate?.finishReason ?? "none") };
   }
 
   function usageOf(body: unknown): Usage {
     const u = (body as { usageMetadata?: Record<string, unknown> } | null)?.usageMetadata ?? {};
     const num = (v: unknown) => (typeof v === "number" ? v : 0);
-    return { in: num(u.promptTokenCount), out: num(u.candidatesTokenCount) };
+    return {
+      in: num(u.promptTokenCount),
+      out: num(u.candidatesTokenCount),
+      thoughts: num(u.thoughtsTokenCount),
+    };
   }
 
   async function backoff(attempt: number, retryAfterMs: number | undefined): Promise<void> {
     if (retryAfterMs !== undefined) return sleep(retryAfterMs);
-    const base = Math.min(500 * 2 ** (attempt - 1), 8000);
+    const base = Math.min(1000 * 2 ** (attempt - 1), 8000);
     await sleep(Math.round(base * (0.8 + 0.4 * random())));
   }
 
   return {
-    async call(prompt, schema) {
+    model,
+    thinking,
+    async call(prompt, signal) {
       let attempts = 0;
-      let itemRetried = false;
       let last = "unknown error";
-
+      const started = now();
       while (attempts < maxAttempts) {
         attempts++;
-        const raw = await post(prompt, schema);
-
+        const raw = await post(prompt, signal);
+        if (raw.kind === "aborted")
+          return { ok: false, fatal: false, reason: "interrupted", attempts };
         if (raw.kind === "network") {
-          last = `network ${raw.reason}`;
+          last = `network: ${raw.reason}`;
+        } else if (raw.status === 200) {
+          const read = readText(raw.body);
+          if (read.text.trim().length > 0) {
+            return { ok: true, ...read, usage: usageOf(raw.body), attempts, ms: now() - started };
+          }
+          last = `empty answer (finishReason ${read.finishReason})`;
+        } else if (RETRYABLE_STATUS.has(raw.status)) {
+          last = `http ${raw.status}${messageOf(raw.body) ? `: ${messageOf(raw.body)}` : ""}`;
           if (attempts < maxAttempts) {
-            await backoff(attempts, undefined);
-            continue;
-          }
-          break;
-        }
-
-        if (raw.status === 200) {
-          const read = readAnswers(raw.body);
-          if (read.ok) {
-            return { ok: true, answers: read.answers, usage: usageOf(raw.body), attempts };
-          }
-          last = read.reason;
-          if (!itemRetried && attempts < maxAttempts) {
-            itemRetried = true;
-            await backoff(attempts, undefined);
-            continue;
-          }
-          return { ok: false, kind: "item", reason: last, attempts };
-        }
-
-        const message = messageOf(raw.body) || `http ${raw.status}`;
-
-        // Measured 2026-09-18: gemini-3.5-flash-lite rejects a wrong thinking field with only
-        // "Request contains an invalid argument." — the message names nothing. So any 400 with
-        // a thinking control set buys one retry without it; a real request error still fails,
-        // one ~100ms call later, with the clearer message.
-        if (raw.status === 400 && thinking) {
-          if (!thinkingWarned) {
-            thinkingWarned = true;
-            onWarn(
-              `${model} rejected the request with a thinking control set (${message}); ` +
-                `retrying without it`,
-            );
-          }
-          thinking = undefined;
-          continue;
-        }
-
-        if (RETRYABLE_STATUS.has(raw.status)) {
-          if (raw.status === 429) onRateLimit();
-          last = `http ${raw.status}`;
-          if (attempts < maxAttempts) {
+            onRetry(last);
             await backoff(attempts, raw.retryAfterMs);
-            continue;
           }
-          break;
+          continue;
+        } else {
+          const message = messageOf(raw.body) || `http ${raw.status}`;
+          const hint = thinking
+            ? ` (sent thinkingConfig ${JSON.stringify(thinking)} for ${model})`
+            : "";
+          return {
+            ok: false,
+            fatal: true,
+            reason: `http ${raw.status}: ${message}${hint}`,
+            attempts,
+          };
         }
-
-        return { ok: false, kind: "fatal", reason: `http ${raw.status}: ${message}`, attempts };
+        if (attempts < maxAttempts) {
+          onRetry(last);
+          await backoff(attempts, undefined);
+        }
       }
-
-      return { ok: false, kind: "item", reason: `${last} after ${attempts} attempts`, attempts };
+      return { ok: false, fatal: false, reason: `${last}, after ${attempts} attempts`, attempts };
     },
   };
 }

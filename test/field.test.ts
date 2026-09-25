@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { extract, parsePath } from "../src/field";
-import { UsageError } from "../src/questions";
+import { UsageError } from "../src/errors";
 
 const get = (item: unknown, path: string) => extract(item, path, parsePath(path));
 

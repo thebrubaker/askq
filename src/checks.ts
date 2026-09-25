@@ -1,0 +1,102 @@
+import type { Verdict, VerdictLine } from "./parse";
+import { handleKey, type View } from "./render";
+
+export const RANK: Record<Verdict, number> = { skip: 0, maybe: 1, read: 2 };
+export const REPEAT_THRESHOLD = 5;
+
+export type Judgement = {
+  verdict: Verdict;
+  tag: string;
+  reason: string;
+  notes: string[];
+  review?: string | undefined;
+};
+
+export type Tally = { missing: string[]; duplicates: string[]; unknown: string[] };
+
+export function collect(
+  lines: readonly VerdictLine[],
+  scope: readonly string[],
+  into: Map<string, Judgement>,
+): Tally {
+  const wanted = new Set(scope);
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  const unknown: string[] = [];
+  for (const l of lines) {
+    if (!wanted.has(l.pointer)) {
+      unknown.push(l.pointer);
+      continue;
+    }
+    const prior = into.get(l.pointer);
+    if (seen.has(l.pointer)) {
+      duplicates.add(l.pointer);
+      if (prior && RANK[l.verdict] <= RANK[prior.verdict]) continue;
+    }
+    seen.add(l.pointer);
+    into.set(l.pointer, { verdict: l.verdict, tag: l.tag, reason: l.reason, notes: [] });
+  }
+  return { missing: scope.filter((p) => !into.has(p)), duplicates: [...duplicates], unknown };
+}
+
+export function liftFragments(judged: Map<string, Judgement>): string[] {
+  const lifted: string[] = [];
+  for (const [pointer, j] of judged) {
+    if (j.verdict !== "skip" || !/^fragment/.test(j.tag)) continue;
+    j.verdict = "maybe";
+    j.notes.push("the model skipped a fragment; askq lifted it to maybe");
+    lifted.push(pointer);
+  }
+  return lifted;
+}
+
+export function authorOf(view: View, pointer: string): string | undefined {
+  if (pointer.startsWith("q")) return view.blocks.find((b) => b.pointer === pointer)?.author;
+  return view.entries.get(Number(pointer.slice(1)))?.author;
+}
+
+export function liftOwn(
+  judged: Map<string, Judgement>,
+  view: View,
+  own: readonly string[],
+): string[] {
+  const accounts = new Set(own.map(handleKey).filter(Boolean));
+  if (accounts.size === 0) return [];
+  const lifted: string[] = [];
+  for (const [pointer, j] of judged) {
+    if (j.verdict !== "skip") continue;
+    const author = authorOf(view, pointer);
+    if (!author || !accounts.has(handleKey(author))) continue;
+    j.verdict = "maybe";
+    j.notes.push(
+      `by ${author}, an account the overview names as the subject's own; askq lifted it to maybe`,
+    );
+    lifted.push(pointer);
+  }
+  return lifted;
+}
+
+export type Repeat = { reason: string; pointers: string[] };
+
+export function repeatedReasons(
+  judged: Map<string, Judgement>,
+  threshold = REPEAT_THRESHOLD,
+): Repeat[] {
+  const byReason = new Map<string, string[]>();
+  for (const [pointer, j] of judged) {
+    const reason = j.reason.trim();
+    if (!reason || j.tag === "empty") continue;
+    byReason.set(reason, [...(byReason.get(reason) ?? []), pointer]);
+  }
+  const repeats = [...byReason]
+    .filter(([, ps]) => ps.length >= threshold)
+    .map(([reason, pointers]) => ({ reason, pointers }))
+    .sort((a, b) => b.pointers.length - a.pointers.length);
+  for (const r of repeats) {
+    for (const p of r.pointers) {
+      const j = judged.get(p);
+      if (j) j.review = `shares the reason "${r.reason}" with ${r.pointers.length - 1} other items`;
+    }
+  }
+  return repeats;
+}
