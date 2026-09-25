@@ -10,6 +10,7 @@ export const MAYBE_CAP = 25;
 export const SPOT_CHECK = 5;
 export const LINE_LIST_CAP = 20;
 export const TERM_SKIP_LIST_CAP = 10;
+export const AUTHOR_COLLAPSE = 3;
 
 export type RollupInput = {
   view: View;
@@ -93,6 +94,40 @@ export function displayOrder(view: View): string[] {
   for (const e of view.sent) out.push(e.pointer, ...(after.get(e.line) ?? []));
   for (const b of view.blocks) if (!out.includes(b.pointer)) out.push(b.pointer);
   return out;
+}
+
+type Group = { lead: string; author: string; rest: string[] };
+
+function collapseByAuthor(view: View, pointers: string[]): Group[] {
+  const authorOf = (p: string) => {
+    if (p.startsWith("q")) return undefined;
+    const a = view.entries.get(lineOf(p))?.author;
+    return a ? at(a) : undefined;
+  };
+  const count = new Map<string, number>();
+  for (const p of pointers) {
+    const a = authorOf(p);
+    if (a) count.set(a.toLowerCase(), (count.get(a.toLowerCase()) ?? 0) + 1);
+  }
+  const groups: Group[] = [];
+  const open = new Map<string, Group>();
+  for (const p of pointers) {
+    const a = authorOf(p);
+    const key = a?.toLowerCase();
+    if (a && key && (count.get(key) ?? 0) >= AUTHOR_COLLAPSE) {
+      const g = open.get(key);
+      if (g) {
+        g.rest.push(p);
+        continue;
+      }
+      const fresh = { lead: p, author: a, rest: [] as string[] };
+      open.set(key, fresh);
+      groups.push(fresh);
+      continue;
+    }
+    groups.push({ lead: p, author: a ?? "", rest: [] });
+  }
+  return groups;
 }
 
 const jqString = (s: string) => JSON.stringify(s).replace(/'/g, "'\\''");
@@ -253,12 +288,25 @@ export function rollup(input: RollupInput): string[] {
     w();
     const refs = pointers.filter((p) => p.startsWith("q")).length;
     const split = refs ? ` (${pointers.length - refs} posts, ${refs} referenced posts)` : "";
+    const groups = collapseByAuthor(view, pointers);
+    const collapsed = groups.some((g) => g.rest.length > 0)
+      ? `; authors with ${AUTHOR_COLLAPSE}+ here shown once`
+      : "";
     w(
-      `${title} — ${pointers.length}${split}${pointers.length > cap ? `, first ${cap} shown` : ""}${note}`,
+      `${title} — ${pointers.length}${split}${groups.length > cap ? `, first ${cap} rows shown` : ""}${note}${collapsed}`,
     );
-    for (const p of pointers.slice(0, cap)) out.push(...row(input, p, judged.get(p)));
-    if (pointers.length > cap) {
-      w(`  … ${pointers.length - cap} more: jq -c 'select(.verdict=="${verdict}")' ${file}`);
+    let reached = 0;
+    for (const g of groups.slice(0, cap)) {
+      out.push(...row(input, g.lead, judged.get(g.lead)));
+      reached += 1 + g.rest.length;
+      if (g.rest.length > 0) {
+        w(
+          `      … and ${g.rest.length} more by ${g.author} here: lines ${list(g.rest.map(lineOf).sort((a, b) => a - b))}`,
+        );
+      }
+    }
+    if (reached < pointers.length) {
+      w(`  … ${pointers.length - reached} more: jq -c 'select(.verdict=="${verdict}")' ${file}`);
     }
   };
   section("read first", read, READ_CAP, "read");
