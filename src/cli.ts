@@ -8,7 +8,7 @@ import { createClient } from "./gemini";
 import type { Role } from "./roles";
 import { splitTerms } from "./terms";
 import { MAX_ITEMS, OVERVIEW_MODEL, run, VERSION } from "./run";
-import { CHUNK_ABOVE, overlapFor, WINDOW_SIZE } from "./windows";
+import { CHUNK_ABOVE, MIN_WINDOW, overlapFor, WINDOW_SIZE } from "./windows";
 
 export const DEFAULT_MODEL = "gemini-3.8-flash";
 const DEFAULT_MAX_COST = 1.0;
@@ -64,8 +64,8 @@ Options
   --help, --version
 
 Advanced
-  --window N        judge in windows of N items, overlapping by N/4, at any size; without it
-                    askq uses windows of ${WINDOW_SIZE} only above ${CHUNK_ABOVE} items
+  --window N        judge in windows of N items (${MIN_WINDOW} to ${CHUNK_ABOVE}), overlapping by N/4, at any
+                    size of input; without it askq uses windows of ${WINDOW_SIZE} only above ${CHUNK_ABOVE} items
 
 Limits
   Up to ${CHUNK_ABOVE} items (posts plus referenced posts), one call sees them all. Above that, askq judges
@@ -212,9 +212,12 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     let window: number | undefined;
     if (values.window !== undefined) {
       window = Number(values.window);
-      if (!Number.isInteger(window) || window < 4 || window > CHUNK_ABOVE) {
+      if (!Number.isInteger(window) || window < MIN_WINDOW || window > CHUNK_ABOVE) {
         throw new UsageError(
-          `--window must be a whole number of items from 4 to ${CHUNK_ABOVE}, got: ${values.window}`,
+          `--window must be a whole number of items from ${MIN_WINDOW} to ${CHUNK_ABOVE}, got: ${values.window}` +
+            (window < MIN_WINDOW && Number.isInteger(window)
+              ? `; smaller windows lost items worth reading in testing`
+              : ""),
         );
       }
     }

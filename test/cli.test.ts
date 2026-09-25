@@ -20,6 +20,13 @@ describe("cli", () => {
     expect(r.stderr).toContain('askq "which of these should I read for X?" < items.jsonl');
   });
 
+  test("--window below 60 is refused, saying why", () => {
+    const r = cli(["which?", "--window", "40", "--print-prompt"], jsonl(posts(1)));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("--window must be a whole number of items from 60 to 400, got: 40");
+    expect(r.stderr).toContain("smaller windows lost items worth reading in testing");
+  });
+
   test("one question per run", () => {
     const r = cli(["one", "two"], jsonl(posts(1)));
     expect(r.status).toBe(2);

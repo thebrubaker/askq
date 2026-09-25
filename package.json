@@ -1,6 +1,6 @@
 {
   "name": "askq",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Ask one question of a whole dataset and get back what to read. One model call sees every item; code checks that every item came back.",
   "type": "module",
   "bin": {

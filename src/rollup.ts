@@ -44,7 +44,7 @@ export type RollupInput = {
   duplicates: string[];
   unknown: string[];
   unparsed: number;
-  lifts: { fragments: string[]; own: string[] };
+  lifts: { fragments: string[]; own: string[]; pointers: string[] };
   repeats: Repeat[];
   hits: Map<Term, string[]>;
   textPath: string | undefined;
@@ -430,6 +430,11 @@ export function rollup(input: RollupInput): string[] {
   );
   const lifted = [
     input.lifts.fragments.length ? `${input.lifts.fragments.length} skipped fragments` : "",
+    input.lifts.pointers.length
+      ? `${input.lifts.pointers.length} short post${input.lifts.pointers.length === 1 ? "" : "s"} quoting a kept post (lines ${list(
+          input.lifts.pointers.filter((p) => p.startsWith("i")).map(lineOf),
+        )})`
+      : "",
     input.lifts.own.length
       ? input.chunk
         ? `${input.lifts.own.length} skipped posts by ${ownList(input)}, named as the subject's own`

@@ -2,6 +2,7 @@ import {
   collect,
   liftFragments,
   liftOwn,
+  liftPointers,
   repeatedReasons,
   type Judgement,
   type Repeat,
@@ -37,7 +38,7 @@ import { describeRoles, resolveRoles, type Role, type Roles } from "./roles";
 import { displayOrder, rollup, type ChunkInfo } from "./rollup";
 import { buildTerms, matchTerms, termsByPointer } from "./terms";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const MAX_ITEMS = 2000;
 export const MAX_INPUT_TOKENS = 400_000;
 export const OVERVIEW_MODEL = "gemini-3.8-flash";
@@ -292,10 +293,9 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
     const from = chunk?.ownFrom.get(account)?.from ?? ["overview"];
     return from.includes("overview") ? "the overview" : `the answer for ${from.join(" and ")}`;
   };
-  const lifts = {
-    fragments: liftFragments(judged),
-    own: liftOwn(judged, view, own, chunk ? namedBy : undefined),
-  };
+  const fragments = liftFragments(judged);
+  const ownLifts = liftOwn(judged, view, own, chunk ? namedBy : undefined);
+  const lifts = { fragments, own: ownLifts, pointers: liftPointers(judged, view) };
 
   if (chunk && !interrupted && !fatal) {
     const order = displayOrder(view);

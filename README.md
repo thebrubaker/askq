@@ -103,7 +103,8 @@ the windows, one overview call reads every item cut to 120 characters and names 
 accounts and the terms your context names; the windows never see it, and askq's checks use it.
 A last call writes the leads from the read and maybe items. An item two windows judged keeps the
 higher verdict, so expect a longer maybe list than one call would give; the roll-up says when a
-run was chunked. `--window N` forces windows of N at any size.
+run was chunked. `--window N` (60 to 400) forces windows of N at any size of input; smaller
+windows lost items worth reading in testing, so askq refuses them.
 
 Over 2,000 items askq refuses, naming the cap and the count. Split a larger pile into several runs,
 by time or by thread, rather than filtering it down: an item dropped to fit is never judged. Gemini
@@ -121,5 +122,5 @@ only.
 
 ## Status
 
-0.2.0, not published. 0.1.0 asked the question of each item in isolation; that design is in
+0.3.0, not published. 0.1.0 asked the question of each item in isolation; that design is in
 the git history. MIT.

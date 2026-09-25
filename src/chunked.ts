@@ -213,6 +213,8 @@ export async function judgeInWindows(input: {
     merge();
   }
 
+  const order = (f: string) => (f === "overview" ? 0 : Number(f.split(" ")[1]));
+  for (const o of out.ownFrom.values()) o.from.sort((a, b) => order(a) - order(b));
   const rank = (from: string[]) =>
     from.includes("overview") ? 0 : Math.min(...from.map((f) => Number(f.split(" ")[1])));
   out.own = [...out.ownFrom.values()]

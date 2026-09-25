@@ -7,6 +7,7 @@ export const WINDOW_SIZE = 60;
 export const WINDOW_TOKENS = 60_000;
 export const CONTEXT_CAP = 40;
 export const CONCURRENCY = 8;
+export const MIN_WINDOW = 60;
 
 export const overlapFor = (size: number) => Math.floor(size / 4);
 

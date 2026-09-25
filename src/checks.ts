@@ -77,6 +77,30 @@ export function liftOwn(
   return lifted;
 }
 
+export const POINTER_TEXT_MAX = 20;
+
+const ownWords = (text: string) => text.replace(/https?:\/\/\S+|@\w+/g, "").trim();
+
+export function liftPointers(judged: Map<string, Judgement>, view: View): string[] {
+  const lifted: string[] = [];
+  for (const e of view.sent) {
+    const j = judged.get(e.pointer);
+    if (j?.verdict !== "skip" || ownWords(e.text).length > POINTER_TEXT_MAX) continue;
+    const target = e.links.find(
+      (l) =>
+        l.kind === "quote" && "pointer" in l && RANK[judged.get(l.pointer)?.verdict ?? "skip"] > 0,
+    );
+    if (!target || !("pointer" in target)) continue;
+    const where = target.pointer.startsWith("q")
+      ? `the post it quotes (askq_ref ${target.pointer})`
+      : `line ${Number(target.pointer.slice(1))}, the post it quotes`;
+    j.verdict = "maybe";
+    j.notes.push(`a short post pointing at ${where}, which was kept; askq lifted it to maybe`);
+    lifted.push(e.pointer);
+  }
+  return lifted;
+}
+
 export type Repeat = { reason: string; pointers: string[]; window?: number };
 
 export function repeatedReasons(

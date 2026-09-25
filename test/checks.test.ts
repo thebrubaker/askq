@@ -129,4 +129,55 @@ describe("safety lifts: askq never lets these be skipped", () => {
     expect(lines.find((x) => x.askq_line === 3)!.verdict).toBe("skip");
     expect(r.text).toContain("named in the overview as the subject's own");
   });
+
+  const pointing = () =>
+    jsonl([
+      ...posts(3),
+      { id: "2001", author: "@helper", text: "@asker Here", quoted_text: posts(1)[0]!.text },
+      {
+        id: "2002",
+        author: "@helper",
+        text: "Here",
+        quoted_text: "a synthetic post that links the repository and the setup steps",
+      },
+    ]);
+
+  test("a short post quoting a kept post becomes maybe, naming the line it points to", async () => {
+    const r = await runWith(
+      pointing(),
+      answerAll((p) => (p === "i001" || p.startsWith("q") ? "m repo: has the setup" : "s pointer")),
+    );
+    const lines = lineRecords(r);
+    expect(lines.find((x) => x.askq_line === 4)!.verdict).toBe("maybe");
+    expect(String(lines.find((x) => x.askq_line === 4)!.askq_note)).toContain(
+      "a short post pointing at line 1, the post it quotes, which was kept",
+    );
+    expect(lines.find((x) => x.askq_line === 5)!.verdict).toBe("maybe");
+    expect(String(lines.find((x) => x.askq_line === 5)!.askq_note)).toContain(
+      "the post it quotes (askq_ref q01)",
+    );
+    expect(r.text).toContain("lifted to maybe: 2 short posts quoting a kept post (lines 4 5)");
+  });
+
+  test("ordinary short skips stay skipped: no quote, a skipped quote, a long quote, or a short reply", async () => {
+    const r = await runWith(
+      jsonl([
+        ...posts(3),
+        { id: "3001", author: "@a", text: "nice" },
+        { id: "3002", author: "@b", text: "lol", quoted_text: posts(2)[1]!.text },
+        {
+          id: "3003",
+          author: "@c",
+          text: "this one is a long enough comment to stand on its own",
+          quoted_text: posts(1)[0]!.text,
+        },
+        { id: "3004", author: "@d", text: "wow", reply_to_id: "1000" },
+      ]),
+      answerAll((p) => (p === "i001" ? "r repo: has the setup" : "s other")),
+    );
+    const lines = lineRecords(r);
+    for (const line of [4, 5, 6, 7])
+      expect(lines.find((x) => x.askq_line === line)!.verdict).toBe("skip");
+    expect(r.text).not.toContain("quoting a kept post");
+  });
 });
