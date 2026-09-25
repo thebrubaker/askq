@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { fstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -98,12 +98,14 @@ function readStdin(): Promise<string> {
   });
 }
 
-function stdoutIsFile(): boolean {
-  try {
-    return fstatSync(1).isFile();
-  } catch {
-    return false;
-  }
+export function closingLine(where: {
+  recordsToStdout: boolean;
+  path: string;
+  stdoutIsTTY: boolean;
+}): string {
+  if (where.recordsToStdout) return "askq: the records went to stdout and the roll-up to stderr";
+  const rollup = where.stdoutIsTTY ? "the roll-up is above" : "the roll-up went to stdout";
+  return `askq: ${rollup}; the records are in ${where.path}`;
 }
 
 function defaultRecordsPath(): string {
@@ -202,9 +204,11 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     const toStdout = values.out === "-";
     const path = toStdout ? "(stdout)" : (values.out ?? defaultRecordsPath());
     const rollupOut = toStdout ? stderr : (line: string) => void process.stdout.write(line + "\n");
+    let written = false;
     const recordsOut = {
       path,
       write: (lines: string[]) => {
+        written = true;
         const body = lines.join("\n") + "\n";
         if (toStdout) {
           process.stdout.write(body);
@@ -239,8 +243,14 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         abort,
       },
     );
-    if (!toStdout && !printPrompt && stdoutIsFile() && code !== 2 && code !== 3) {
-      stderr(`askq: stdout is a file, so the roll-up went there; the records are in ${path}`);
+    if (written) {
+      stderr(
+        closingLine({
+          recordsToStdout: toStdout,
+          path,
+          stdoutIsTTY: process.stdout.isTTY === true,
+        }),
+      );
     }
     return code;
   } catch (e) {

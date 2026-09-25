@@ -57,3 +57,25 @@ describe("cli", () => {
     }
   });
 });
+
+describe("closing line", () => {
+  test("names where the roll-up and the records went, for a pipe, a file and a terminal", async () => {
+    const { closingLine } = await import("../src/cli");
+    const path = "/tmp/askq/r.jsonl";
+    expect(closingLine({ recordsToStdout: false, path, stdoutIsTTY: false })).toBe(
+      "askq: the roll-up went to stdout; the records are in /tmp/askq/r.jsonl",
+    );
+    expect(closingLine({ recordsToStdout: false, path, stdoutIsTTY: true })).toBe(
+      "askq: the roll-up is above; the records are in /tmp/askq/r.jsonl",
+    );
+    expect(closingLine({ recordsToStdout: true, path: "(stdout)", stdoutIsTTY: false })).toBe(
+      "askq: the records went to stdout and the roll-up to stderr",
+    );
+  });
+
+  test("a run that wrote nothing says nothing about where it went", () => {
+    const r = cli(["which?", "--max-cost", "0"], jsonl(posts(3)), { GEMINI_API_KEY: "not-used" });
+    expect(r.status).toBe(3);
+    expect(r.stderr).not.toContain("the records are in");
+  });
+});
