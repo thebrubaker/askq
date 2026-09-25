@@ -16,7 +16,8 @@ import { buildPrompt, buildRepairPrompt, type Ask } from "./prompt";
 import { blockRecord, lineRecord, type LineOutcome } from "./records";
 import { buildView } from "./render";
 import { describeRoles, resolveRoles, type Role } from "./roles";
-import { rollup } from "./rollup";
+import { displayOrder, rollup } from "./rollup";
+import { buildTerms, matchTerms, termsByPointer } from "./terms";
 
 export const VERSION = "0.2.0-dev";
 export const MAX_ITEMS = 800;
@@ -31,6 +32,7 @@ export type RunConfig = {
   yes: boolean;
   printPrompt: boolean;
   maxItems?: number;
+  watch?: string[];
 };
 
 export type Sink = (line: string) => void;
@@ -106,6 +108,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
   let interrupted = false;
   let summary: Claim[] = [];
   let own: string[] = [];
+  let named: string[] = [];
   let repaired: string[] = [];
   let duplicates: string[] = [];
   let unknown: string[] = [];
@@ -137,6 +140,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
       const parsed = parseResponse(first.text);
       summary = parsed.summary;
       own = parsed.own;
+      named = parsed.named;
       unparsed += parsed.unparsed.length;
       const tally = collect(parsed.lines, view.pointers, judged);
       duplicates = tally.duplicates;
@@ -163,6 +167,9 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
   }
 
   const lifts = { fragments: liftFragments(judged), own: liftOwn(judged, view, own) };
+  const terms = buildTerms(named, cfg.watch ?? []);
+  const hits = matchTerms(terms, view, displayOrder(view));
+  const termsOf = termsByPointer(hits);
   const repeats: Repeat[] = repeatedReasons(judged);
 
   const failure = aborted
@@ -215,16 +222,30 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
       tokens: { in: tokensIn, out: tokensOut },
       usd: usd ?? null,
       own,
+      terms: terms.map((t) => ({
+        term: t.term,
+        from: t.from,
+        forms: t.forms,
+        matches: hits.get(t)!.length,
+      })),
       summary,
     },
   };
   const records = [
     JSON.stringify(runRecord),
     ...Array.from({ length: lines.length }, (_, i) =>
-      JSON.stringify(lineRecord(i + 1, outcomes.get(i + 1)!)),
+      JSON.stringify(lineRecord(i + 1, outcomes.get(i + 1)!, termsOf)),
     ),
     ...view.blocks.map((b) =>
-      JSON.stringify(blockRecord(view, b, judged.get(b.pointer), blockErrors.get(b.pointer))),
+      JSON.stringify(
+        blockRecord(
+          view,
+          b,
+          judged.get(b.pointer),
+          blockErrors.get(b.pointer),
+          termsOf.get(b.pointer),
+        ),
+      ),
     ),
   ];
   deps.recordsOut.write(records);
@@ -249,6 +270,8 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
     unparsed,
     lifts,
     repeats,
+    hits,
+    textPath: roles.text?.path,
     file: deps.recordsOut.path,
     badLines: bad.size,
     interrupted,

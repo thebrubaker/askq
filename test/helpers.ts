@@ -38,7 +38,7 @@ export function fakeClient(answer: Answer, model = "gemini-3.8-flash") {
 
 export function answerAll(
   verdictOf: (pointer: string) => string = () => "r note: synthetic reason",
-  extra: { own?: string; summary?: string[] } = {},
+  extra: { own?: string; summary?: string[]; named?: string } = {},
 ) {
   return (prompt: string) => {
     const lines = pointersIn(prompt).map((p) => `${p} ${verdictOf(p)}`);
@@ -52,6 +52,7 @@ export function answerAll(
       "",
       "SUMMARY",
       ...(extra.summary ?? ["- a synthetic claim [i001]"]),
+      ...(extra.named ? ["", `named: ${extra.named}`] : []),
     ].join("\n");
   };
 }

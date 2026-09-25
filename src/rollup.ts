@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import type { Judgement, Repeat } from "./checks";
 import { formatUsd } from "./cost";
 import type { Claim } from "./parse";
-import { at, type Block, type View } from "./render";
+import { at, SNIPPET_MAX, type Block, type View } from "./render";
+import type { Term } from "./terms";
 
 export const READ_CAP = 40;
 export const MAYBE_CAP = 25;
 export const SPOT_CHECK = 5;
 export const LINE_LIST_CAP = 20;
+export const TERM_SKIP_LIST_CAP = 10;
 
 export type RollupInput = {
   view: View;
@@ -29,6 +31,8 @@ export type RollupInput = {
   unparsed: number;
   lifts: { fragments: string[]; own: string[] };
   repeats: Repeat[];
+  hits: Map<Term, string[]>;
+  textPath: string | undefined;
   file: string;
   badLines: number;
   interrupted: boolean;
@@ -70,7 +74,7 @@ function row(input: RollupInput, pointer: string, j: Judgement | undefined): str
   ];
 }
 
-function snip(s: string, max = 110): string {
+function snip(s: string, max = SNIPPET_MAX): string {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }
@@ -89,6 +93,47 @@ export function displayOrder(view: View): string[] {
   for (const e of view.sent) out.push(e.pointer, ...(after.get(e.line) ?? []));
   for (const b of view.blocks) if (!out.includes(b.pointer)) out.push(b.pointer);
   return out;
+}
+
+const jqString = (s: string) => JSON.stringify(s).replace(/'/g, "'\\''");
+
+function termLines(input: RollupInput): string[] {
+  const { view, judged, file } = input;
+  const out: string[] = [];
+  for (const [t, pointers] of input.hits) {
+    const from = t.from.map((f) => (f === "context" ? "context" : "--watch")).join(" and ");
+    const also =
+      t.forms.length > 1
+        ? ` · also as ${t.forms
+            .slice(1)
+            .map((f) => `"${f}"`)
+            .join(", ")}`
+        : "";
+    const head = `  ${t.term} · from ${from}${also} · `;
+    if (pointers.length === 0) {
+      out.push(`${head}no items`);
+      continue;
+    }
+    const of = (v: string) => pointers.filter((p) => judged.get(p)?.verdict === v);
+    const skipped = pointers.filter((p) => judged.get(p)?.verdict === "skip" || isEmpty(view, p));
+    const unjudged = pointers.filter((p) => !judged.has(p) && !isEmpty(view, p)).length;
+    const counts =
+      `${pointers.length} item${pointers.length === 1 ? "" : "s"}: ${of("read").length} read, ` +
+      `${of("maybe").length} maybe, ${skipped.length} skipped` +
+      (unjudged ? `, ${unjudged} without a verdict` : "");
+    const detail =
+      skipped.length === 0
+        ? ""
+        : skipped.length <= TERM_SKIP_LIST_CAP
+          ? ` (${skipped.map((p) => pointerLabel(view, p)).join(", ")})`
+          : `: jq -c 'select(.verdict=="skip" and any((.askq_terms // [])[]; . == ${jqString(t.term)}))' ${file}`;
+    out.push(`${head}${counts}${detail}`);
+  }
+  return out;
+}
+
+function isEmpty(view: View, pointer: string): boolean {
+  return view.empties.some((e) => e.pointer === pointer);
 }
 
 function spotCheck(input: RollupInput): string[] {
@@ -183,12 +228,33 @@ export function rollup(input: RollupInput): string[] {
     }
   }
 
-  const section = (title: string, pointers: string[], cap: number, verdict: string) => {
+  if (input.hits.size > 0) {
+    w();
+    w(
+      "terms — how the items that name each term were judged (post text and author; case, spaces and hyphens ignored)",
+    );
+    for (const l of termLines(input)) w(l);
+  }
+
+  const named = new Set([...input.hits.values()].flat());
+  const namedFirst = [...maybe.filter((p) => named.has(p)), ...maybe.filter((p) => !named.has(p))];
+  const sortedNote = maybe.some((p) => named.has(p)) ? "; items naming a term first" : "";
+
+  const example = [...read, ...maybe].find((p) => !p.startsWith("q")) ?? view.sent[0]?.pointer;
+  if (example) {
+    w();
+    w(
+      `snippets are cut at ${SNIPPET_MAX} characters; the records hold the full text: ` +
+        `jq -r 'select(.askq_line==${lineOf(example)}) | .item${input.textPath ?? ""}' ${file}`,
+    );
+  }
+
+  const section = (title: string, pointers: string[], cap: number, verdict: string, note = "") => {
     w();
     const refs = pointers.filter((p) => p.startsWith("q")).length;
     const split = refs ? ` (${pointers.length - refs} posts, ${refs} referenced posts)` : "";
     w(
-      `${title} — ${pointers.length}${split}${pointers.length > cap ? `, first ${cap} shown` : ""}`,
+      `${title} — ${pointers.length}${split}${pointers.length > cap ? `, first ${cap} shown` : ""}${note}`,
     );
     for (const p of pointers.slice(0, cap)) out.push(...row(input, p, judged.get(p)));
     if (pointers.length > cap) {
@@ -196,7 +262,7 @@ export function rollup(input: RollupInput): string[] {
     }
   };
   section("read first", read, READ_CAP, "read");
-  section("then maybe", maybe, MAYBE_CAP, "maybe");
+  section("then maybe", namedFirst, MAYBE_CAP, "maybe", sortedNote);
 
   const spot = spotCheck(input);
   w();

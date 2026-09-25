@@ -1,3 +1,5 @@
+import { splitTerms } from "./terms";
+
 export type Verdict = "read" | "maybe" | "skip";
 
 export type VerdictLine = { pointer: string; verdict: Verdict; tag: string; reason: string };
@@ -6,6 +8,7 @@ export type Claim = { text: string; pointers: string[] };
 
 export type Parsed = {
   own: string[];
+  named: string[];
   threads: string[][];
   lines: VerdictLine[];
   summary: Claim[];
@@ -49,7 +52,7 @@ export function parseResponse(text: string): Parsed {
   const sawItems = rows.some(
     (r) => HEADER.exec(unmark(r).replace(/^[#\s]+/, ""))?.[1]?.toUpperCase() === "ITEMS",
   );
-  const out: Parsed = { own: [], threads: [], lines: [], summary: [], unparsed: [] };
+  const out: Parsed = { own: [], named: [], threads: [], lines: [], summary: [], unparsed: [] };
   let section = sawItems ? "" : "ITEMS";
 
   for (const raw of rows) {
@@ -60,6 +63,11 @@ export function parseResponse(text: string): Parsed {
     const header = HEADER.exec(bare);
     if (header) {
       section = header[1]!.toUpperCase();
+      continue;
+    }
+    const namedLine = /^named\s*:\s*(.*)$/i.exec(bare);
+    if (namedLine && section !== "ITEMS") {
+      out.named = splitTerms(namedLine[1]!);
       continue;
     }
     if (section === "OVERVIEW" || (!sawItems && /^(own|threads)\s*:/i.test(bare))) {

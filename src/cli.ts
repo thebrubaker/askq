@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { UsageError } from "./errors";
 import { createClient } from "./gemini";
 import type { Role } from "./roles";
+import { splitTerms } from "./terms";
 import { MAX_ITEMS, run, VERSION } from "./run";
 
 export const DEFAULT_MODEL = "gemini-3.8-flash";
@@ -53,6 +54,8 @@ Output
 
 Options
   --context TEXT    what you already know and what you care about, in your own words
+  --watch "A, B"    terms to track: the roll-up says how every item naming one was judged,
+                    alongside the terms the model finds named in --context
   --model ID        default ${DEFAULT_MODEL}
   --max-cost USD    refuse to start if the run is estimated over this; default ${DEFAULT_MAX_COST.toFixed(2)}
   --yes             run anyway, past --max-cost
@@ -124,6 +127,7 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
       args: argv,
       options: {
         context: { type: "string" },
+        watch: { type: "string", multiple: true },
         id: { type: "string" },
         text: { type: "string" },
         author: { type: "string" },
@@ -202,7 +206,7 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     const input = await readStdin();
 
     const toStdout = values.out === "-";
-    const path = toStdout ? "(stdout)" : (values.out ?? defaultRecordsPath());
+    const path = toStdout ? "(stdout)" : resolve(values.out ?? defaultRecordsPath());
     const rollupOut = toStdout ? stderr : (line: string) => void process.stdout.write(line + "\n");
     let written = false;
     const recordsOut = {
@@ -229,6 +233,7 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         maxCost,
         yes: values.yes === true,
         printPrompt,
+        watch: (values.watch ?? []).flatMap(splitTerms),
       },
       {
         client: () =>

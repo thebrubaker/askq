@@ -8,9 +8,15 @@ export type LineOutcome =
 
 export const EMPTY_NOTE = "askq skipped it without asking the model: no text, no media, no quote";
 
-export function lineRecord(line: number, outcome: LineOutcome): Record<string, unknown> {
+export function lineRecord(
+  line: number,
+  outcome: LineOutcome,
+  termsOf: Map<string, string[]> = new Map(),
+): Record<string, unknown> {
   const head: Record<string, unknown> = { askq_line: line };
   if (outcome.entry) head.askq_id = outcome.entry.id ?? null;
+  const terms = outcome.entry ? termsOf.get(outcome.entry.pointer) : undefined;
+  if (terms) head.askq_terms = terms;
   if (outcome.kind === "error") {
     return {
       ...head,
@@ -44,6 +50,7 @@ export function blockRecord(
   block: Block,
   judgement: Judgement | undefined,
   error?: string,
+  terms?: string[],
 ): Record<string, unknown> {
   const first = view.entries.get(block.lines[0]!);
   const head = {
@@ -52,6 +59,7 @@ export function blockRecord(
     askq_lines: block.lines,
     askq_id: first?.id ?? null,
     author: block.author ?? null,
+    ...(terms ? { askq_terms: terms } : {}),
   };
   const item = { author: block.author ?? null, text: block.text };
   if (!judgement) return { ...head, askq_error: error ?? "no verdict", item };

@@ -112,6 +112,13 @@ export function buildPrompt(view: View, ask: Ask): string {
     "SUMMARY",
     'Three to five short claims about what this dataset says for the reader\'s question, one per line starting with "- ", ' +
       `each ending with the pointers that support it in brackets, like [${examples(view.width).read}, ${examples(view.width).skip}].`,
+    ...(ask.context
+      ? [
+          "",
+          "After the SUMMARY, one last line:",
+          "named: <the products, models, people, accounts or places the reader's context names, each in the short form a post would use, separated by commas; none if it names none>",
+        ]
+      : []),
   ].join("\n");
 }
 
