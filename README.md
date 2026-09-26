@@ -74,8 +74,8 @@ flags; the roll-up's `roles:` line shows what was used, and a flag overrides any
   word for word (within one window, when there are windows) is a warning, and each of those
   records carries `askq_review`.
 - **It won't let two kinds of item be skipped:** a fragment the model says it can't make sense of,
-  and a post by an account the overview names as the subject's (its creator, company or staff)
-  and that wrote something in the data. Both become maybe, with a note.
+  and a post by an account that wrote something in the data and that the overview, or at least two
+  windows, names as the subject's (its creator, company or staff). Both become maybe, with a note.
 - **A stalled call doesn't stall the run.** A call slower than twice the run's median (45 seconds
   at least) gets one duplicate, and the first good answer wins; after 150 seconds the call fails.
 - **It never prompts.** A run that needs more calls than `--max-calls` (default 100) refuses
@@ -116,7 +116,8 @@ chunked. `--window N` (60 to 400) forces windows of N at any size of input; smal
 items worth reading in testing, so askq refuses them.
 
 With `--backend gemini`, one call sees up to 400 items and windows overlap by 15, so an item may be
-judged only once.
+judged only once. The Gemini path shares the vote rule and the own-accounts guard described here,
+and neither change has been measured on Gemini.
 
 Over 2,000 items askq refuses, naming the cap and the count. Split a larger pile into several runs,
 by time or by thread, rather than filtering it down: an item dropped to fit is never judged.

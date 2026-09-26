@@ -6,6 +6,8 @@ import { buildWindowRepairPrompt, type Ask } from "./prompt";
 import { handleKey, type View } from "./render";
 import { CONCURRENCY, type Window } from "./windows";
 
+export const OWN_WINDOWS = 2;
+
 export type WindowStatus = {
   window: number;
   items: number;
@@ -128,6 +130,7 @@ export async function judgeInWindows(input: {
     out.tokens.out += r.usage.out + r.usage.thoughts;
     const parsed = parseResponse(r.text);
     out.unparsed += parsed.unparsed.length;
+    for (const h of ownAccounts(view, parsed.own)) addOwn(h, `window ${k + 1}`);
     const lines = parsed.lines.filter((l) => !contextOf[k]!.has(l.pointer));
     const tally = collect(lines, plan[k]!.pointers, out.windowJudged[k]!);
     out.duplicates.push(...tally.duplicates);
@@ -214,6 +217,8 @@ export async function judgeInWindows(input: {
     merge();
   }
 
+  for (const [key, o] of out.ownFrom)
+    if (!o.from.includes("overview") && o.from.length < OWN_WINDOWS) out.ownFrom.delete(key);
   const order = (f: string) => (f === "overview" ? 0 : Number(f.split(" ")[1]));
   for (const o of out.ownFrom.values()) o.from.sort((a, b) => order(a) - order(b));
   const rank = (from: string[]) =>

@@ -265,7 +265,7 @@ describe("safety nets across windows", () => {
     expect(spread.text).not.toContain("share the reason");
   });
 
-  test("own accounts come from the overview only, and only accounts that wrote something here", async () => {
+  test("own accounts: the overview's, and any two windows name; one window alone is not enough", async () => {
     const r = await runWith(
       twenty(),
       scripted({
@@ -273,16 +273,25 @@ describe("safety nets across windows", () => {
         own: (prompt, k) =>
           k === "overview"
             ? "@user3 (the maker's staff), @ghost_account"
-            : partOf(prompt) === 2
-              ? "@user12"
-              : "none",
+            : partOf(prompt) === 1
+              ? "@user7, @user2"
+              : partOf(prompt) === 2
+                ? "@user7 (staff)"
+                : "@user16",
       }),
       { window: 8 },
     );
     expect(record(r, 3).verdict).toBe("maybe");
     expect(String(record(r, 3).askq_note)).toContain("the overview names as the subject's own");
-    expect(record(r, 12).verdict).toBe("skip");
-    expect(r.text).toContain("1 skipped posts by @user3 (overview), named as the subject's own");
+    expect(record(r, 7).verdict).toBe("maybe");
+    expect(String(record(r, 7).askq_note)).toContain(
+      "the answer for window 1 and window 2 names as the subject's own",
+    );
+    expect(record(r, 2).verdict).toBe("skip");
+    expect(record(r, 16).verdict).toBe("skip");
+    expect(r.text).toContain(
+      "2 skipped posts by @user3 (overview) @user7 (window 1, window 2), named as the subject's own",
+    );
     expect(r.text).not.toContain("ghost_account");
   });
 
