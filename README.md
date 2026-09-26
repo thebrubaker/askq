@@ -134,5 +134,5 @@ by time or by thread, rather than filtering it down: an item dropped to fit is n
 
 ## Status
 
-0.3.0, not published. 0.1.0 asked the question of each item in isolation; that design is in
+0.4.0, not published. 0.1.0 asked the question of each item in isolation; that design is in
 the git history. MIT.

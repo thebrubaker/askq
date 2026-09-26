@@ -42,7 +42,7 @@ import { describeRoles, resolveRoles, type Role, type Roles } from "./roles";
 import { displayOrder, rollup, type ChunkInfo } from "./rollup";
 import { buildTerms, matchTerms, termsByPointer } from "./terms";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 export const MAX_ITEMS = 2000;
 export const MAX_INPUT_TOKENS = 400_000;
 export const OVERVIEW_MODEL = "gemini-3.8-flash";
