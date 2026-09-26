@@ -8,9 +8,10 @@ can't read all of it, so you reach for one of two things. You grep, which finds 
 "benchmark" and misses every post that reports one without saying so. Or you hand the pile to a
 sub-agent and tell it to read everything, and it skims, and nothing tells you what it skipped.
 
-`askq` hands the whole pile to one model call and asks for a verdict on every item: read, maybe
-or skip, with a tag and a short reason. Past 400 items it splits the pile into overlapping windows
-instead (see [Limits](#limits)). Code checks that every item came back, and prints a roll-up:
+`askq` has a model judge every item twice and asks for a verdict each time: read, maybe or skip,
+with a tag and a short reason. An item is read only when both judgements read it; one read or one
+maybe makes it maybe. Up to 60 items two calls each see the whole pile; past that, overlapping
+windows do (see [Limits](#limits)). Code checks that every item came back, and prints a roll-up:
 leads, the read list, the maybe list, and five items it skipped, so you can check it was right to
 skip them.
 
@@ -20,20 +21,23 @@ jq -c '.[]' tweets.json | npx askq \
   --context "tweets from an X search; I care about latency, quality and hardware"
 ```
 
-Requires `GEMINI_API_KEY`. About 13 seconds and 2 cents for 150 tweets.
+Requires Claude Code's `claude` CLI, installed and signed in: askq runs Sonnet through it, on your
+Claude subscription. About 30 seconds and 7 calls for 150 tweets. `--backend gemini` uses
+`GEMINI_API_KEY` instead.
 
 ## What you get back
 
 - **The roll-up, on stdout.** Bounded, meant to be read: a header with the records path and the
   fields askq used, warnings first, the model's leads (labelled as leads to verify, each citing the
-  lines it rests on), the read list, the maybe list, a spot-check of five skipped items (one per
+  lines it rests on), the read list, the maybe list (items one judgement read first), a spot-check of five skipped items (one per
   tag), and a checks line. Every row carries the line, the author, the tag and reason, the item's
   url and a snippet. A post that others quote is listed with an item you can open, never as a bare
   internal pointer.
 - **The records, in a file.** One JSON line per input line (`askq_line`, `askq_id`, `verdict`,
   `tag`, `reason`, `item`), then one per referenced post (`askq_ref`), after a first line holding
   the run (`askq_run`). A run judged in windows adds `askq_windows` (the windows that held the
-  item) and, when more than one window judged it, `askq_votes` (each window's verdict). By default under your temp directory, so scraped content can't land in a
+  item), and an item judged more than once carries `askq_votes` (each judgement's verdict). The
+  records file goes under your temp directory by default, so scraped content can't land in a
   repo by accident; `--out FILE` to choose. The roll-up names the path once, as a shell
   assignment, and every `jq` it prints after that reads `"$R"`:
 
@@ -70,10 +74,13 @@ flags; the roll-up's `roles:` line shows what was used, and a flag overrides any
   word for word (within one window, when there are windows) is a warning, and each of those
   records carries `askq_review`.
 - **It won't let two kinds of item be skipped:** a fragment the model says it can't make sense of,
-  and a post by an account the model's own overview names as the subject's (its creator, company
-  or staff). Both become maybe, with a note.
-- **It never prompts.** A run estimated over `--max-cost` (default $1.00) refuses before sending
-  anything and exits 3.
+  and a post by an account the overview names as the subject's (its creator, company or staff)
+  and that wrote something in the data. Both become maybe, with a note.
+- **A stalled call doesn't stall the run.** A call slower than twice the run's median (45 seconds
+  at least) gets one duplicate, and the first good answer wins; after 150 seconds the call fails.
+- **It never prompts.** A run that needs more calls than `--max-calls` (default 100) refuses
+  before sending anything and exits 3, and askq never starts more calls than that. With
+  `--backend gemini`, `--max-cost` (default $1.00) does the same by estimated dollars.
 
 ## What it does not
 
@@ -86,29 +93,33 @@ flags; the roll-up's `roles:` line shows what was used, and a flag overrides any
 
 ## How well it holds up
 
-On a 150-tweet set with saved labels (scraped, so not in this repo), two identical runs each kept
-33 of 33 items marked must-read and 14 of 14 items a blind labelling marked substantive, in about
-13 seconds and $0.022 per run. One dataset and one question: treat it as direction. Windowed runs
-have not yet been measured against that bar.
+On a 150-tweet set with saved labels (scraped, so not in this repo), three test runs of this design
+and one run of the built CLI each kept 33 of 33 items marked must-read and 14 of 14 items a blind
+labelling marked substantive, in 29 to 31 seconds and 7 calls each. One dataset and one question: treat it as direction.
+
+On an 856-item pile the same design took 74 seconds with every window started at once. askq now
+runs at most 8 calls at a time, so expect a pile that size to take longer.
 
 ## Limits
 
-Up to 400 items, one call sees them all. Posts that the items quote or repost are judged as items
-too, so they count.
+Up to 60 items, two parallel calls each see them all. Posts that the items quote or repost are
+judged as items too, so they count.
 
-Above 400 items, or when the rendered pile is too long for one call, askq judges it in windows of
-60 items that overlap by 15. A window keeps a thread or a reply chain together where it can, and
-shows each item the posts it answers or quotes even when those sit in another window. Alongside
-the windows, one overview call reads every item cut to 120 characters and names the subject's own
-accounts and the terms your context names; the windows never see it, and askq's checks use it.
-A last call writes the leads from the read and maybe items. An item two windows judged keeps the
-higher verdict, so expect a longer maybe list than one call would give; the roll-up says when a
-run was chunked. `--window N` (60 to 400) forces windows of N at any size of input; smaller
-windows lost items worth reading in testing, so askq refuses them.
+Above 60 items, or when the rendered pile is too long for one call, askq judges it in windows of
+60 items that overlap by 30, the last one wrapping round to the start, so every item is judged by
+two windows. Up to 8 calls run at once. A window keeps a thread or a reply chain together where it
+can, and shows each item the posts it answers or quotes even when those sit in another window.
+Alongside the windows, one overview call reads every item cut to 120 characters and names the
+subject's own accounts and the terms your context names; the windows never see it, and askq's
+checks use it. A last call writes the leads from the read items. The roll-up says when a run was
+chunked. `--window N` (60 to 400) forces windows of N at any size of input; smaller windows lost
+items worth reading in testing, so askq refuses them.
+
+With `--backend gemini`, one call sees up to 400 items and windows overlap by 15, so an item may be
+judged only once.
 
 Over 2,000 items askq refuses, naming the cap and the count. Split a larger pile into several runs,
-by time or by thread, rather than filtering it down: an item dropped to fit is never judged. Gemini
-only.
+by time or by thread, rather than filtering it down: an item dropped to fit is never judged.
 
 ## Exit codes
 
@@ -117,7 +128,7 @@ only.
 | 0   | every item has a verdict                                                             |
 | 1   | coverage incomplete: some items have no verdict (`askq_error`, named in the roll-up) |
 | 2   | usage error, over the item cap, or the API refused the request in a way that repeats |
-| 3   | estimated over `--max-cost`; nothing was sent                                        |
+| 3   | over `--max-calls`, or estimated over `--max-cost`; nothing was sent                 |
 | 130 | interrupted                                                                          |
 
 ## Status

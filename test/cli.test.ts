@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HELP } from "../src/cli";
 import { jsonl, posts } from "./helpers";
@@ -9,8 +11,15 @@ const cli = (args: string[], input = "", env: Record<string, string> = {}) =>
   spawnSync("bun", [ENTRY, ...args], {
     input,
     encoding: "utf8",
-    env: { ...process.env, GEMINI_API_KEY: "", ...env },
+    env: { ...process.env, GEMINI_API_KEY: "", ASKQ_CLAUDE_BIN: "/nonexistent/claude", ...env },
   });
+
+function signedInClaude(): string {
+  const bin = join(mkdtempSync(join(tmpdir(), "askq-cli-claude-")), "claude");
+  writeFileSync(bin, `#!/bin/bash\nif [ "$1" = auth ]; then echo '{"loggedIn": true}'; exit 0; fi\nexit 9\n`);
+  chmodSync(bin, 0o755);
+  return bin;
+}
 
 describe("cli", () => {
   test("a v1 flag says what replaced it", () => {
@@ -43,10 +52,26 @@ describe("cli", () => {
     expect(r.stdout).toContain("[i002] @user2");
   });
 
-  test("without a key a real run is a usage error", () => {
-    const r = cli(["which?"], jsonl(posts(1)));
+  test("--backend gemini without a key is a usage error", () => {
+    const r = cli(["which?", "--backend", "gemini"], jsonl(posts(1)));
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("GEMINI_API_KEY is not set");
+  });
+
+  test("the default backend without a usable claude CLI says so plainly", () => {
+    const r = cli(["which?"], jsonl(posts(1)));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("ASKQ_CLAUDE_BIN is /nonexistent/claude, which is not an executable: point it at the claude CLI");
+  });
+
+  test("--max-calls refuses before any model call; --max-cost is for gemini", () => {
+    const bin = signedInClaude();
+    const r = cli(["which?", "--max-calls", "3"], jsonl(posts(90)), { ASKQ_CLAUDE_BIN: bin });
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain("need 5 model calls (3 windows, an overview and a leads call), over --max-calls 3");
+    const cost = cli(["which?", "--max-cost", "1"], jsonl(posts(1)), { ASKQ_CLAUDE_BIN: bin });
+    expect(cost.status).toBe(2);
+    expect(cost.stderr).toContain("cap it with --max-calls");
   });
 
   test("help names --context and the flags a scrape shape can need", () => {
@@ -81,7 +106,9 @@ describe("closing line", () => {
   });
 
   test("a run that wrote nothing says nothing about where it went", () => {
-    const r = cli(["which?", "--max-cost", "0"], jsonl(posts(3)), { GEMINI_API_KEY: "not-used" });
+    const r = cli(["which?", "--backend", "gemini", "--max-cost", "0"], jsonl(posts(3)), {
+      GEMINI_API_KEY: "not-used",
+    });
     expect(r.status).toBe(3);
     expect(r.stderr).not.toContain("the records are in");
   });

@@ -40,11 +40,8 @@ function verdictLine(raw: string): VerdictLine | undefined {
 }
 
 export function handles(s: string): string[] {
-  if (/^\s*(none|n\/a|-)\s*\.?\s*$/i.test(s)) return [];
-  return s
-    .split(/[,;\s]+/)
-    .map((t) => t.replace(/^[([]+|[)\].,:;]+$/g, ""))
-    .filter((t) => /^@?[A-Za-z0-9_]{1,30}$/.test(t) && !/^(none|and|or|the|its|staff)$/i.test(t));
+  if (/^\s*(none|n\/a|-)(?![A-Za-z0-9_])/i.test(s)) return [];
+  return [...s.matchAll(/(?<![A-Za-z0-9_@])@([A-Za-z0-9_]{1,30})(?![A-Za-z0-9_])/g)].map((m) => m[1]!);
 }
 
 export function parseResponse(text: string): Parsed {

@@ -1,7 +1,7 @@
 {
   "name": "askq",
   "version": "0.3.0",
-  "description": "Ask one question of a whole dataset and get back what to read. One model call sees every item; code checks that every item came back.",
+  "description": "Ask one question of a whole dataset and get back what to read. Every item is judged twice; code checks that every item came back.",
   "type": "module",
   "bin": {
     "askq": "bin/askq.mjs"
@@ -38,6 +38,7 @@
     "cli",
     "jsonl",
     "llm",
+    "claude",
     "gemini",
     "triage",
     "discourse",

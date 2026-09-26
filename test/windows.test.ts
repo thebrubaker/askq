@@ -172,7 +172,7 @@ describe("chunked coverage", () => {
 });
 
 describe("merging windows", () => {
-  test("the higher verdict wins and every window's vote is kept", async () => {
+  test("read needs every window's read; one read or one maybe keeps the item as maybe", async () => {
     const r = await runWith(
       twenty(),
       scripted({
@@ -180,18 +180,26 @@ describe("merging windows", () => {
           p === "i007"
             ? partOf(prompt) === 1
               ? "s promo"
-              : "m usage: maybe a usage report"
-            : distinct(p),
+              : "r usage: a usage report"
+            : p === "i008"
+              ? "r usage: read by both"
+              : distinct(p),
       }),
       { window: 8 },
     );
     expect(record(r, 7).verdict).toBe("maybe");
-    expect(record(r, 7).askq_votes).toEqual(["skip", "maybe"]);
+    expect(record(r, 7).reason).toBe("a usage report");
+    expect(record(r, 7).askq_votes).toEqual(["skip", "read"]);
     expect(record(r, 7).askq_windows).toEqual([1, 2]);
+    expect(record(r, 8).verdict).toBe("read");
+    expect(record(r, 8).askq_votes).toEqual(["read", "read"]);
     expect(r.rollup[1]).toBe(
       "chunked: --window 8 asked for windows, so judged in 3 windows of up to 8 items that overlap by 2, not in one call. " +
-        "4 items were judged twice and kept the higher verdict (1 disagreed). Expect a longer maybe list than one call would give.",
+        "4 items were judged more than once (1 disagreed): an item is read only when every judgement read it; one read, " +
+        "or any maybe, makes it maybe. Expect a longer maybe list than one call would give.",
     );
+    const maybeHeader = r.rollup.findIndex((l) => l.startsWith("then maybe"));
+    expect(r.rollup[maybeHeader]).toContain("items one judgement read first");
   });
 
   test("a quoted post two windows hold is judged in both and keeps one verdict", async () => {
@@ -217,7 +225,7 @@ describe("merging windows", () => {
     expect(ref.askq_votes).toEqual(["skip", "maybe"]);
   });
 
-  test("leads come from one call over the read and maybe items", async () => {
+  test("leads come from one call over the read items only", async () => {
     const r = await runWith(
       twenty(),
       scripted({
@@ -229,7 +237,7 @@ describe("merging windows", () => {
     const leads = r.prompts.filter((p) => kindOf(p) === "leads");
     expect(leads).toHaveLength(1);
     expect(leads[0]).toContain('<read count="1">');
-    expect(leads[0]).toContain('<maybe count="1">');
+    expect(leads[0]).not.toContain("<maybe");
     expect(r.text).toContain("  - a synthetic claim  [1]");
   });
 });
@@ -257,29 +265,30 @@ describe("safety nets across windows", () => {
     expect(spread.text).not.toContain("share the reason");
   });
 
-  test("own accounts from the overview and from one window are both guarded, each with its source", async () => {
+  test("own accounts come from the overview only, and only accounts that wrote something here", async () => {
     const r = await runWith(
       twenty(),
       scripted({
         verdict: () => "s other",
         own: (prompt, k) =>
-          k === "overview" ? "@user3" : partOf(prompt) === 2 ? "@user12" : "none",
+          k === "overview"
+            ? "@user3 (the maker's staff), @ghost_account"
+            : partOf(prompt) === 2
+              ? "@user12"
+              : "none",
       }),
       { window: 8 },
     );
     expect(record(r, 3).verdict).toBe("maybe");
-    expect(record(r, 12).verdict).toBe("maybe");
-    expect(String(record(r, 12).askq_note)).toContain(
-      "the answer for window 2 names as the subject's own",
-    );
-    expect(r.text).toContain(
-      "2 skipped posts by @user3 (overview) @user12 (window 2), named as the subject's own",
-    );
+    expect(String(record(r, 3).askq_note)).toContain("the overview names as the subject's own");
+    expect(record(r, 12).verdict).toBe("skip");
+    expect(r.text).toContain("1 skipped posts by @user3 (overview), named as the subject's own");
+    expect(r.text).not.toContain("ghost_account");
   });
 
   test("the overview answer parses with no headers, and with markdown", () => {
     expect(parseOverview("own: @alpha, @beta\nnamed: Widget, Gizmo")).toEqual({
-      own: ["@alpha", "@beta"],
+      own: ["alpha", "beta"],
       named: ["Widget", "Gizmo"],
     });
     expect(parseOverview("OVERVIEW\n**own:** none\n- named: Widget")).toEqual({

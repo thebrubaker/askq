@@ -1,5 +1,7 @@
 import {
   collect,
+  mergeVotes,
+  ownAccounts,
   liftFragments,
   liftOwn,
   liftPointers,
@@ -12,7 +14,7 @@ import { Coverage } from "./coverage";
 import { UsageError } from "./errors";
 import type { Client } from "./gemini";
 import { parseLine, splitLines } from "./lines";
-import { parseLeads, parseResponse, type Claim } from "./parse";
+import { parseLeads, parseResponse, type Claim, type Verdict } from "./parse";
 import {
   buildLeadsPrompt,
   buildOverviewPrompt,
@@ -26,8 +28,10 @@ import { judgeInWindows, type ChunkResult } from "./chunked";
 import {
   CHUNK_ABOVE,
   CHUNK_TOKENS,
+  halfOverlap,
   overlapFor,
   planWindows,
+  WINDOW_TOKENS,
   WINDOW_SIZE,
   type Window,
 } from "./windows";
@@ -43,6 +47,27 @@ export const MAX_ITEMS = 2000;
 export const MAX_INPUT_TOKENS = 400_000;
 export const OVERVIEW_MODEL = "gemini-3.8-flash";
 
+export type Layout = {
+  chunkAbove: number;
+  halfOverlap: boolean;
+  twice: boolean;
+  everyReason: boolean;
+};
+
+export const GEMINI_LAYOUT: Layout = {
+  chunkAbove: CHUNK_ABOVE,
+  halfOverlap: false,
+  twice: false,
+  everyReason: false,
+};
+
+export const CLAUDE_LAYOUT: Layout = {
+  chunkAbove: 60,
+  halfOverlap: true,
+  twice: true,
+  everyReason: true,
+};
+
 export type RunConfig = {
   ask: Ask;
   flags: Partial<Record<Role, string>>;
@@ -54,6 +79,8 @@ export type RunConfig = {
   maxItems?: number;
   watch?: string[];
   window?: number | undefined;
+  layout?: Layout;
+  maxCalls?: number | undefined;
 };
 
 export type Sink = (line: string) => void;
@@ -118,22 +145,28 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
   const view = buildView({ total: lines.length, items, roles });
   const rolesLine = describeRoles(roles, items.size);
   const ask = cfg.ask;
-  const prompt = view.pointers.length > 0 ? buildPrompt(view, ask) : "";
+  const layout = cfg.layout ?? GEMINI_LAYOUT;
+  const prompt = view.pointers.length > 0 ? buildPrompt(view, ask, layout.everyReason) : "";
   const single = estimate(prompt.length, view.pointers.length, cfg.model);
   const why: ChunkWhy | undefined =
     view.pointers.length === 0
       ? undefined
       : cfg.window !== undefined
         ? "flag"
-        : view.pointers.length > CHUNK_ABOVE
+        : view.pointers.length > layout.chunkAbove
           ? "items"
           : single.tokensIn > CHUNK_TOKENS
             ? "tokens"
             : undefined;
   const size = cfg.window ?? WINDOW_SIZE;
-  const overlap = overlapFor(size);
-  const plan: Window[] = why ? planWindows(view, size, overlap) : [];
-  const windowPrompts = plan.map((w) => buildWindowPrompt(view, w, plan.length, ask));
+  const overlap = layout.halfOverlap ? halfOverlap(size) : overlapFor(size);
+  const plan: Window[] = why
+    ? planWindows(view, size, overlap, WINDOW_TOKENS, layout.halfOverlap)
+    : [];
+  const windowPrompts = plan.map((w) =>
+    buildWindowPrompt(view, w, plan.length, ask, layout.everyReason),
+  );
+  const twice = !why && layout.twice;
   const overviewPrompt = why ? buildOverviewPrompt(view, ask) : "";
 
   if (cfg.printPrompt) {
@@ -142,8 +175,8 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
       return 0;
     }
     deps.rollupOut(
-      `askq: ${view.pointers.length} items would be judged in ${plan.length} windows. Below: the overview prompt ` +
-        `(${OVERVIEW_MODEL}), then each window's. The leads prompt depends on the verdicts, so it is not shown.`,
+      `askq: ${view.pointers.length} items would be judged in ${plan.length} windows. Below: the overview prompt, ` +
+        `then each window's. The leads prompt depends on the verdicts, so it is not shown.`,
     );
     deps.rollupOut(`=== overview ===\n${overviewPrompt}`);
     windowPrompts.forEach((p, k) =>
@@ -156,6 +189,16 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
   if (view.pointers.length > cap) {
     for (const line of capRefusal(view, roles, lines.length, cap)) deps.notice(line);
     return 2;
+  }
+
+  const planned = why ? plan.length + 2 : twice ? 2 : 1;
+  if (cfg.maxCalls !== undefined && !cfg.yes && planned > cfg.maxCalls) {
+    deps.notice(
+      `askq: ${view.pointers.length} items need ${planned} model calls` +
+        (why ? ` (${plan.length} windows, an overview and a leads call)` : "") +
+        `, over --max-calls ${cfg.maxCalls}. Nothing was sent. Re-run with --yes or raise --max-calls.`,
+    );
+    return 3;
   }
 
   const guess = why ? chunkEstimate(view, windowPrompts, plan, overviewPrompt, cfg.model) : single;
@@ -188,40 +231,68 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
 
   let chunk: ChunkResult | undefined;
 
+  let votes: Map<string, Verdict[]> | undefined;
   if (view.pointers.length > 0 && !why) {
     const client = deps.client();
     deps.notice(
-      `askq: ${view.pointers.length} items to ${client.model} in one call` +
+      `askq: ${view.pointers.length} items to ${client.model} in ${twice ? "two parallel calls, each seeing every item" : "one call"}` +
         (view.empties.length ? ` (${view.empties.length} empty, skipped)` : "") +
         (guess.usd !== undefined ? `, est. ~${formatUsd(guess.usd)}` : "") +
         (client.thinking
           ? ""
           : `; no thinking setting known for ${client.model}, so its cost and time may vary`),
     );
-    const first = await client.call(prompt, deps.abort);
-    calls += first.attempts;
-    if (!first.ok) {
-      if (first.reason === "interrupted") interrupted = true;
-      else {
+    const answers = await Promise.all(
+      (twice ? [0, 1] : [0]).map(() => client.call(prompt, deps.abort)),
+    );
+    for (const a of answers) calls += a.attempts;
+    const good = answers.flatMap((a) => (a.ok ? [a] : []));
+    if (good.length === 0) {
+      const first = answers[0]!;
+      if (!first.ok && first.reason === "interrupted") interrupted = true;
+      else if (!first.ok) {
         aborted = first.reason;
         fatal = first.fatal;
       }
       missing = [...view.pointers];
     } else {
-      tokensIn += first.usage.in;
-      tokensOut += first.usage.out + first.usage.thoughts;
-      const parsed = parseResponse(first.text);
-      summary = parsed.summary;
-      own = parsed.own;
-      named = parsed.named;
-      unparsed += parsed.unparsed.length;
-      const tally = collect(parsed.lines, view.pointers, judged);
-      duplicates = tally.duplicates;
-      unknown = tally.unknown;
-      missing = tally.missing;
+      const parsedAll = good.map((a) => {
+        tokensIn += a.usage.in;
+        tokensOut += a.usage.out + a.usage.thoughts;
+        return parseResponse(a.text);
+      });
+      summary = parsedAll.find((x) => x.summary.length > 0)?.summary ?? [];
+      own = ownAccounts(
+        view,
+        parsedAll.flatMap((x) => x.own),
+      );
+      named = parsedAll.find((x) => x.named.length > 0)?.named ?? [];
+      const maps = parsedAll.map((x) => {
+        unparsed += x.unparsed.length;
+        const m = new Map<string, Judgement>();
+        const tally = collect(x.lines, view.pointers, m);
+        duplicates.push(...tally.duplicates);
+        unknown.push(...tally.unknown);
+        return m;
+      });
+      duplicates = [...new Set(duplicates)];
+      if (maps.length === 1) for (const [p, j] of maps[0]!) judged.set(p, j);
+      else {
+        votes = new Map();
+        for (const p of view.pointers) {
+          const js = maps.flatMap((m) => (m.has(p) ? [m.get(p)!] : []));
+          if (js.length === 0) continue;
+          judged.set(p, mergeVotes(js));
+          votes.set(p, js.map((j) => j.verdict));
+        }
+      }
+      missing = view.pointers.filter((p) => !judged.has(p));
 
       if (missing.length > 0 && !deps.abort?.aborted) {
-        const retry = await client.call(buildRepairPrompt(view, ask, missing), deps.abort);
+        const retry = await client.call(
+          buildRepairPrompt(view, ask, missing, layout.everyReason),
+          deps.abort,
+        );
         calls += retry.attempts;
         if (retry.ok) {
           tokensIn += retry.usage.in;
@@ -264,6 +335,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
       client,
       overviewClient,
       maxInputTokens: MAX_INPUT_TOKENS,
+      everyReason: layout.everyReason,
       abort: deps.abort,
     });
     for (const [p, j] of chunk.judged) judged.set(p, j);
@@ -303,7 +375,7 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
       view,
       ask,
       order.filter((p) => judged.get(p)?.verdict === "read"),
-      order.filter((p) => judged.get(p)?.verdict === "maybe"),
+      [],
     );
     if (leadsPrompt) {
       const client = deps.client();
@@ -407,11 +479,14 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
     },
   };
   const extra = (pointer: string): Record<string, unknown> => {
-    if (!chunk) return {};
-    const votes = chunk.votes.get(pointer) ?? [];
+    if (!chunk) {
+      const v = votes?.get(pointer) ?? [];
+      return v.length > 1 ? { askq_votes: v } : {};
+    }
+    const v = chunk.votes.get(pointer) ?? [];
     return {
       askq_windows: chunk.windowsOf.get(pointer) ?? [],
-      ...(votes.length > 1 ? { askq_votes: votes } : {}),
+      ...(v.length > 1 ? { askq_votes: v } : {}),
     };
   };
   const records = [
@@ -460,7 +535,8 @@ export async function run(input: string, cfg: RunConfig, deps: RunDeps): Promise
     badLines: bad.size,
     interrupted,
     aborted,
-    chunk: chunk && why ? chunkSummary(chunk, why, size, overlap, leadsFailed) : undefined,
+    chunk: chunk && why ? chunkSummary(chunk, why, size, overlap, leadsFailed, layout) : undefined,
+    votes: chunk?.votes ?? votes,
   })) {
     deps.rollupOut(line);
   }
@@ -507,10 +583,13 @@ function chunkSummary(
   size: number,
   overlap: number,
   leadsFailed: string | undefined,
+  layout: Layout,
 ): ChunkInfo {
   const votes = [...chunk.votes.values()];
   return {
     why,
+    above: layout.chunkAbove,
+    wrap: layout.halfOverlap,
     windows: chunk.status.length,
     size,
     overlap,

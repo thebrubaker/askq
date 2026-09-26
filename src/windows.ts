@@ -10,6 +10,7 @@ export const CONCURRENCY = 8;
 export const MIN_WINDOW = 60;
 
 export const overlapFor = (size: number) => Math.floor(size / 4);
+export const halfOverlap = (size: number) => Math.floor(size / 2);
 
 export type Window = {
   index: number;
@@ -53,6 +54,7 @@ export function planWindows(
   size = WINDOW_SIZE,
   overlap = overlapFor(size),
   maxTokens = WINDOW_TOKENS,
+  wrap = false,
 ): Window[] {
   const groups: Unit[][] = [];
   let current: Unit[] = [];
@@ -79,6 +81,14 @@ export function planWindows(
     current.push(unit);
   }
   if (current.length > 0) groups.push(current);
+  if (wrap && groups.length > 1) {
+    const seen = new Map<string, number>();
+    for (const g of groups)
+      for (const p of new Set(g.flatMap((u) => u.entries.map((e) => e.pointer))))
+        seen.set(p, (seen.get(p) ?? 0) + 1);
+    const once = view.sent.filter((e) => (seen.get(e.pointer) ?? 0) < 2);
+    for (let s = 0; s < once.length; s += size) groups.push([{ entries: once.slice(s, s + size) }]);
+  }
 
   const sentPointers = new Set(view.sent.map((e) => e.pointer));
   return groups.map((units, index) => {

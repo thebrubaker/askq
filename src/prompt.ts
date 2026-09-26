@@ -69,7 +69,7 @@ const WHOLE_SET =
   "You see every item at once, so use what only the whole set shows: authors who post more than once, " +
   "items that continue or answer each other, and patterns that repeat across items.";
 
-function itemRules(view: View, scopeLine: string): string[] {
+function itemRules(view: View, scopeLine: string, everyReason = false): string[] {
   const ex = examples(view.width);
   return [
     "ITEMS",
@@ -77,10 +77,12 @@ function itemRules(view: View, scopeLine: string): string[] {
     "<pointer> <r|m|s> <tag>: <reason>",
     "- r = read (worth the reader's time for this question), m = maybe (could be; you are unsure), s = skip (clearly not worth reading for this question).",
     "- tag: one word for what the item is.",
-    "- reason: six words or fewer, only for r and m. For s write only the pointer, s and the tag.",
+    everyReason
+      ? "- reason: six words or fewer, on every line, s lines included."
+      : "- reason: six words or fewer, only for r and m. For s write only the pointer, s and the tag.",
     "",
     "Example lines (made-up pointers):",
-    `${ex.skip} s promo`,
+    everyReason ? `${ex.skip} s promo: launch announcement, nothing measured` : `${ex.skip} s promo`,
     `${ex.read} r benchmark: accuracy versus two named baselines`,
     "",
     "Missing an item worth reading is much worse than giving the reader an extra one: when unsure between m and s, " +
@@ -98,7 +100,7 @@ function summaryRule(width: number): string {
   );
 }
 
-export function buildPrompt(view: View, ask: Ask): string {
+export function buildPrompt(view: View, ask: Ask, everyReason = false): string {
   const items = view.sent.length;
   const refs = view.blocks.length;
   const every =
@@ -116,7 +118,7 @@ export function buildPrompt(view: View, ask: Ask): string {
     "own: <handles of the accounts that belong to the subject of the question: its creator, company or staff; none if there are none>",
     'threads: <pointers of each thread or conversation; separate groups with " | ">',
     "",
-    ...itemRules(view, every),
+    ...itemRules(view, every, everyReason),
     "",
     "SUMMARY",
     summaryRule(view.width),
@@ -130,7 +132,7 @@ export function buildPrompt(view: View, ask: Ask): string {
   ].join("\n");
 }
 
-export function buildRepairPrompt(view: View, ask: Ask, scope: string[]): string {
+export function buildRepairPrompt(view: View, ask: Ask, scope: string[], everyReason = false): string {
   const scopeLine =
     `One line for each of these ${scope.length} pointers only, in this order: ${scope.join(" ")}. ` +
     "The other pointers were judged separately; still use them as context.";
@@ -141,7 +143,7 @@ export function buildRepairPrompt(view: View, ask: Ask, scope: string[]): string
     "",
     "Answer in plain text: no JSON, no markdown, no commentary. Only an ITEMS block.",
     "",
-    ...itemRules(view, scopeLine),
+    ...itemRules(view, scopeLine, everyReason),
   ].join("\n");
 }
 
@@ -210,7 +212,13 @@ function windowDataBlock(view: View, win: Window, parts: number): string[] {
   return lines;
 }
 
-export function buildWindowPrompt(view: View, win: Window, parts: number, ask: Ask): string {
+export function buildWindowPrompt(
+  view: View,
+  win: Window,
+  parts: number,
+  ask: Ask,
+  everyReason = false,
+): string {
   const n = win.entries.length;
   const refs = win.blocks.length;
   const every =
@@ -228,7 +236,7 @@ export function buildWindowPrompt(view: View, win: Window, parts: number, ask: A
     "own: <handles of the accounts that belong to the subject of the question: its creator, company or staff; none if there are none>",
     'threads: <pointers of each thread or conversation; separate groups with " | ">',
     "",
-    ...itemRules(view, every),
+    ...itemRules(view, every, everyReason),
   ].join("\n");
 }
 
@@ -238,6 +246,7 @@ export function buildWindowRepairPrompt(
   parts: number,
   ask: Ask,
   scope: string[],
+  everyReason = false,
 ): string {
   const scopeLine =
     `One line for each of these ${scope.length} pointers only, in this order: ${scope.join(" ")}. ` +
@@ -249,7 +258,7 @@ export function buildWindowRepairPrompt(
     "",
     "Answer in plain text: no JSON, no markdown, no commentary. Only an ITEMS block.",
     "",
-    ...itemRules(view, scopeLine),
+    ...itemRules(view, scopeLine, everyReason),
   ].join("\n");
 }
 
@@ -309,7 +318,8 @@ export function buildOverviewPrompt(view: View, ask: Ask): string {
   ].join("\n");
 }
 
-export const LEADS_MAX_CHARS = 200_000;
+export const LEADS_MAX_CHARS = 60_000;
+export const LEADS_TOTAL_CHARS = 100_000;
 export const LEADS_CUT = 200;
 
 export function buildLeadsPrompt(
@@ -337,6 +347,7 @@ export function buildLeadsPrompt(
   let used = 0;
   const readRows: string[] = [];
   for (const p of read) {
+    if (used >= LEADS_TOTAL_CHARS) break;
     const row = used < LEADS_MAX_CHARS ? full(p) : short(p);
     used += row.length + 2;
     readRows.push(row);
@@ -349,13 +360,15 @@ export function buildLeadsPrompt(
     maybeRows.push(row);
   }
   return [
-    `Below are the ${read.length} items a first pass over a dataset of ${view.sent.length} items marked worth reading` +
+    (readRows.length === read.length
+      ? `Below are the ${read.length} items a first pass over a dataset of ${view.sent.length} items marked worth reading`
+      : `Below are the first ${readRows.length} of the ${read.length} items a first pass over a dataset of ${view.sent.length} items marked worth reading`) +
       (maybeRows.length
         ? `, then ${maybeRows.length === maybe.length ? "the" : `the first ${maybeRows.length} of the`} ${maybe.length} it marked maybe, each cut to its first ${LEADS_CUT} characters`
         : "") +
       ". Each starts with a pointer in brackets.",
     "",
-    `<read count="${read.length}">`,
+    `<read count="${readRows.length}">`,
     readRows.join("\n\n"),
     "</read>",
     ...(maybeRows.length

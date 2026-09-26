@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Judgement, Repeat } from "./checks";
 import { formatUsd } from "./cost";
-import type { Claim } from "./parse";
+import type { Claim, Verdict } from "./parse";
 import { at, SNIPPET_MAX, type Block, type View } from "./render";
 import type { Term } from "./terms";
 
@@ -14,6 +14,8 @@ export const AUTHOR_COLLAPSE = 3;
 
 export type ChunkInfo = {
   why: "flag" | "items" | "tokens";
+  above: number;
+  wrap: boolean;
   windows: number;
   size: number;
   overlap: number;
@@ -53,18 +55,23 @@ export type RollupInput = {
   interrupted: boolean;
   aborted: string | undefined;
   chunk?: ChunkInfo | undefined;
+  votes?: Map<string, Verdict[]> | undefined;
 };
+
+const VOTE_RULE =
+  "an item is read only when every judgement read it; one read, or any maybe, makes it maybe";
 
 const CHUNK_WHY = {
   flag: (c: ChunkInfo) => `--window ${c.size} asked for windows`,
-  items: () => "over 400 items",
+  items: (c: ChunkInfo) => `over ${c.above} items`,
   tokens: () => "too long for one call",
 };
 
 function chunkLine(c: ChunkInfo): string {
   return (
-    `chunked: ${CHUNK_WHY[c.why](c)}, so judged in ${c.windows} windows of up to ${c.size} items that overlap by ${c.overlap}, ` +
-    `not in one call. ${c.twice} items were judged twice and kept the higher verdict (${c.disagreed} disagreed). ` +
+    `chunked: ${CHUNK_WHY[c.why](c)}, so judged in ${c.windows} windows of up to ${c.size} items that overlap by ${c.overlap}` +
+    `${c.wrap ? ", the last wrapping round to the start" : ""}, not in one call. ` +
+    `${c.twice} items were judged more than once (${c.disagreed} disagreed): ${VOTE_RULE}. ` +
     "Expect a longer maybe list than one call would give."
   );
 }
@@ -266,6 +273,12 @@ export function rollup(input: RollupInput): string[] {
       `${input.tokensOut.toLocaleString("en-US")} out tokens${cost}`,
   );
   if (input.chunk) w(chunkLine(input.chunk));
+  else if (input.votes && input.votes.size > 0) {
+    const v = [...input.votes.values()];
+    w(
+      `judged twice: two calls each saw every item (${v.filter((x) => new Set(x).size > 1).length} disagreed): ${VOTE_RULE}.`,
+    );
+  }
   w(
     file === "(stdout)"
       ? "records: on stdout (--out -); set R to the file you saved them in, and the commands below read it"
@@ -344,8 +357,14 @@ export function rollup(input: RollupInput): string[] {
   }
 
   const named = new Set([...input.hits.values()].flat());
-  const namedFirst = [...maybe.filter((p) => named.has(p)), ...maybe.filter((p) => !named.has(p))];
-  const sortedNote = maybe.some((p) => named.has(p)) ? "; items naming a term first" : "";
+  const oneRead = new Set(maybe.filter((p) => input.votes?.get(p)?.includes("read")));
+  const rank = (p: string) => (oneRead.has(p) ? 0 : 2) + (named.has(p) ? 0 : 1);
+  const namedFirst = [...maybe].sort((a, b) => rank(a) - rank(b));
+  const notes = [
+    ...(oneRead.size > 0 ? ["items one judgement read first"] : []),
+    ...(maybe.some((p) => named.has(p)) ? [`items naming a term ${oneRead.size > 0 ? "next" : "first"}`] : []),
+  ];
+  const sortedNote = notes.length ? `; ${notes.join(", ")}` : "";
 
   const example = [...read, ...maybe].find((p) => !p.startsWith("q")) ?? view.sent[0]?.pointer;
   if (example) {

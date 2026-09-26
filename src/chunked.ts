@@ -1,4 +1,4 @@
-import { collect, RANK, type Judgement } from "./checks";
+import { collect, mergeVotes, ownAccounts, type Judgement } from "./checks";
 import { CHARS_PER_TOKEN } from "./cost";
 import type { Client } from "./gemini";
 import { parseOverview, parseResponse, type Verdict } from "./parse";
@@ -60,6 +60,7 @@ export async function judgeInWindows(input: {
   overviewClient: Client;
   maxInputTokens: number;
   abort?: AbortSignal | undefined;
+  everyReason?: boolean;
 }): Promise<ChunkResult> {
   const { view, plan, prompts, ask, client, abort } = input;
   const out: ChunkResult = {
@@ -127,7 +128,6 @@ export async function judgeInWindows(input: {
     out.tokens.out += r.usage.out + r.usage.thoughts;
     const parsed = parseResponse(r.text);
     out.unparsed += parsed.unparsed.length;
-    for (const h of parsed.own) addOwn(h, `window ${k + 1}`);
     const lines = parsed.lines.filter((l) => !contextOf[k]!.has(l.pointer));
     const tally = collect(lines, plan[k]!.pointers, out.windowJudged[k]!);
     out.duplicates.push(...tally.duplicates);
@@ -144,7 +144,7 @@ export async function judgeInWindows(input: {
     out.overviewTokens.in += r.usage.in;
     out.overviewTokens.out += r.usage.out + r.usage.thoughts;
     const o = parseOverview(r.text);
-    for (const h of o.own) addOwn(h, "overview");
+    for (const h of ownAccounts(view, o.own)) addOwn(h, "overview");
     out.named = o.named;
   })();
 
@@ -168,13 +168,14 @@ export async function judgeInWindows(input: {
   const merge = () => {
     out.judged.clear();
     out.votes.clear();
+    const all = new Map<string, Judgement[]>();
     out.windowJudged.forEach((m) => {
-      for (const [p, j] of m) {
-        out.votes.set(p, [...(out.votes.get(p) ?? []), j.verdict]);
-        const kept = out.judged.get(p);
-        if (!kept || RANK[j.verdict] > RANK[kept.verdict]) out.judged.set(p, j);
-      }
+      for (const [p, j] of m) all.set(p, [...(all.get(p) ?? []), j]);
     });
+    for (const [p, js] of all) {
+      out.votes.set(p, js.map((j) => j.verdict));
+      out.judged.set(p, mergeVotes(js));
+    }
   };
   merge();
 
@@ -190,7 +191,7 @@ export async function judgeInWindows(input: {
       [...scopes].map(([k, scope]) => async () => {
         if (stop) return;
         const r = await client.call(
-          buildWindowRepairPrompt(view, plan[k]!, plan.length, ask, scope),
+          buildWindowRepairPrompt(view, plan[k]!, plan.length, ask, scope, input.everyReason),
           abort,
         );
         out.calls += r.attempts;

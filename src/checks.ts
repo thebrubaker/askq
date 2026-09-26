@@ -39,6 +39,31 @@ export function collect(
   return { missing: scope.filter((p) => !into.has(p)), duplicates: [...duplicates], unknown };
 }
 
+export function mergeVotes(votes: readonly Judgement[]): Judgement {
+  const best = votes.reduce((a, b) => (RANK[b.verdict] > RANK[a.verdict] ? b : a));
+  const verdict: Verdict = votes.every((v) => v.verdict === "read")
+    ? "read"
+    : votes.some((v) => v.verdict !== "skip")
+      ? "maybe"
+      : "skip";
+  return { ...best, verdict, notes: [...best.notes] };
+}
+
+export function ownAccounts(view: View, handles: readonly string[]): string[] {
+  const authors = new Set(
+    [...[...view.entries.values()].map((e) => e.author), ...view.blocks.map((b) => b.author)]
+      .map(handleKey)
+      .filter(Boolean),
+  );
+  const seen = new Set<string>();
+  return handles.filter((h) => {
+    const key = handleKey(h);
+    if (!authors.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function liftFragments(judged: Map<string, Judgement>): string[] {
   const lifted: string[] = [];
   for (const [pointer, j] of judged) {

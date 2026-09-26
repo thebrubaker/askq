@@ -4,22 +4,24 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { UsageError } from "./errors";
+import { checkClaude, CLAUDE_MODEL, createClaudeClient, DEFAULT_MAX_CALLS } from "./claude";
 import { createClient } from "./gemini";
 import type { Role } from "./roles";
 import { splitTerms } from "./terms";
-import { MAX_ITEMS, OVERVIEW_MODEL, run, VERSION } from "./run";
-import { CHUNK_ABOVE, MIN_WINDOW, overlapFor, WINDOW_SIZE } from "./windows";
+import { CLAUDE_LAYOUT, GEMINI_LAYOUT, MAX_ITEMS, OVERVIEW_MODEL, run, VERSION } from "./run";
+import { CHUNK_ABOVE, halfOverlap, MIN_WINDOW, WINDOW_SIZE } from "./windows";
 
-export const DEFAULT_MODEL = "gemini-3.8-flash";
+export const DEFAULT_MODEL = CLAUDE_MODEL;
+export const GEMINI_MODEL = "gemini-3.8-flash";
 const DEFAULT_MAX_COST = 1.0;
 
 export const HELP = `askq — ask one question of a whole dataset, get back what to read
 
-  You have a pile of posts, messages or records and one question about them. askq hands the
-  whole pile to one model call, gets a verdict for every item (read, maybe or skip, with a tag
-  and a short reason), checks in code that every item came back, and prints a roll-up: leads,
-  the read list, the maybe list, and five of the skipped items so you can check it was right to
-  skip them. Every item's verdict goes to a records file the roll-up names.
+  You have a pile of posts, messages or records and one question about them. askq has a model
+  judge every item twice (read, maybe or skip, with a tag and a short reason), checks in code that
+  every item came back, and prints a roll-up: leads, the read list, the maybe list, and five of the
+  skipped items so you can check it was right to skip them. Every item's verdict goes to a records
+  file the roll-up names.
 
   askq decides what you read first. It is not the last reader.
 
@@ -57,29 +59,36 @@ Options
   --context TEXT    what you already know and what you care about, in your own words
   --watch "A, B"    terms to track: the roll-up says how every item naming one was judged,
                     alongside the terms the model finds named in --context
-  --model ID        default ${DEFAULT_MODEL}
-  --max-cost USD    refuse to start if the run is estimated over this; default ${DEFAULT_MAX_COST.toFixed(2)}
-  --yes             run anyway, past --max-cost
+  --backend NAME    claude (default): Claude Code's claude CLI, signed in, on your subscription.
+                    gemini: the Gemini API with GEMINI_API_KEY, judging each item once up to ${CHUNK_ABOVE} items
+  --model ID        default ${DEFAULT_MODEL} (claude) or ${GEMINI_MODEL} (gemini)
+  --max-calls N     claude: refuse to start if the run needs more model calls than this, and never
+                    start more; default ${DEFAULT_MAX_CALLS}
+  --max-cost USD    gemini: refuse to start if the run is estimated over this; default ${DEFAULT_MAX_COST.toFixed(2)}
+  --yes             run anyway, past --max-calls or --max-cost
   --print-prompt    print the exact prompt and exit, calling nothing
   --help, --version
 
 Advanced
-  --window N        judge in windows of N items (${MIN_WINDOW} to ${CHUNK_ABOVE}), overlapping by N/4, at any
-                    size of input; without it askq uses windows of ${WINDOW_SIZE} only above ${CHUNK_ABOVE} items
+  --window N        judge in windows of N items (${MIN_WINDOW} to ${CHUNK_ABOVE}) at any size of input; they
+                    overlap by N/2 (claude) or N/4 (gemini)
 
 Limits
-  Up to ${CHUNK_ABOVE} items (posts plus referenced posts), one call sees them all. Above that, askq judges
-  them in windows of ${WINDOW_SIZE} that overlap by ${overlapFor(WINDOW_SIZE)}, each window seeing only its own items and the
-  posts they answer or quote; an overview pass over every item (${OVERVIEW_MODEL}) names the
-  subject's own accounts and the context's terms, and a last call writes the leads. An item judged
-  in two windows keeps the higher verdict, so the maybe list runs longer than one call's would.
+  claude: up to ${CLAUDE_LAYOUT.chunkAbove} items (posts plus referenced posts), two parallel calls each see them all.
+  Above that, askq judges them in windows of ${WINDOW_SIZE} that overlap by ${halfOverlap(WINDOW_SIZE)}, the last wrapping round to
+  the start, so every item is judged by two windows; up to 8 calls run at once. Each window sees only
+  its own items and the posts they answer or quote. An overview pass over every item names the
+  subject's own accounts and the context's terms, and a last call writes the leads from the read
+  items. An item is read only when both judgements read it; one read or one maybe makes it maybe.
+  gemini: one call up to ${CHUNK_ABOVE} items; above that, windows of ${WINDOW_SIZE} that overlap by 15, with the
+  overview on ${OVERVIEW_MODEL}.
   Over ${MAX_ITEMS.toLocaleString("en-US")} items askq refuses, naming the cap.
 
 Exit codes
   0    every item has a verdict
   1    coverage incomplete: some items have no verdict (askq_error in the records, named in the roll-up)
   2    usage error, over the item cap, or the API refused the request in a way that would repeat
-  3    estimated over --max-cost; nothing was sent
+  3    over --max-calls or estimated over --max-cost; nothing was sent
   130  interrupted
 `;
 
@@ -97,6 +106,8 @@ const V1_FLAGS = new Set([
   "no-cache",
   "allow-empty",
 ]);
+
+const cfgCalls = (cap: number, yes: boolean) => (yes ? Number.MAX_SAFE_INTEGER : cap);
 
 function readStdin(): Promise<string> {
   if (process.stdin.isTTY) {
@@ -146,7 +157,9 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         quote: { type: "string" },
         "no-roles": { type: "boolean" },
         out: { type: "string" },
+        backend: { type: "string" },
         model: { type: "string" },
+        "max-calls": { type: "string" },
         "max-cost": { type: "string" },
         yes: { type: "boolean" },
         "print-prompt": { type: "boolean" },
@@ -193,7 +206,25 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
     const question = positionals[0]!.trim();
     if (!question) throw new UsageError("the question is empty");
 
-    let maxCost: number | undefined = DEFAULT_MAX_COST;
+    const backend = values.backend ?? "claude";
+    if (backend !== "claude" && backend !== "gemini") {
+      throw new UsageError(`--backend is claude or gemini, got: ${backend}`);
+    }
+    if (backend === "claude" && values["max-cost"] !== undefined) {
+      throw new UsageError(
+        "--max-cost prices Gemini calls; the claude backend runs on a subscription, so cap it with --max-calls",
+      );
+    }
+    let maxCalls: number | undefined = backend === "claude" ? DEFAULT_MAX_CALLS : undefined;
+    if (values["max-calls"] !== undefined) {
+      if (backend !== "claude") throw new UsageError("--max-calls is for the claude backend; gemini uses --max-cost");
+      maxCalls = Number(values["max-calls"]);
+      if (!Number.isInteger(maxCalls) || maxCalls < 1) {
+        throw new UsageError(`--max-calls must be a whole number of 1 or more, got: ${values["max-calls"]}`);
+      }
+    }
+
+    let maxCost: number | undefined = backend === "gemini" ? DEFAULT_MAX_COST : undefined;
     if (values["max-cost"] !== undefined) {
       maxCost = Number(values["max-cost"]);
       if (!Number.isFinite(maxCost) || maxCost < 0) {
@@ -222,10 +253,21 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
       }
     }
 
-    const model = values.model ?? DEFAULT_MODEL;
+    const model = values.model ?? (backend === "claude" ? DEFAULT_MODEL : GEMINI_MODEL);
     const printPrompt = values["print-prompt"] === true;
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!printPrompt && !apiKey) throw new UsageError("GEMINI_API_KEY is not set");
+    if (!printPrompt && backend === "gemini" && !apiKey) {
+      throw new UsageError("GEMINI_API_KEY is not set (--backend gemini needs it)");
+    }
+    const bin = !printPrompt && backend === "claude" ? checkClaude() : undefined;
+    const claude = bin
+      ? createClaudeClient({
+          bin,
+          model,
+          ...(maxCalls !== undefined ? { maxCalls: cfgCalls(maxCalls, values.yes === true) } : {}),
+          onHedge: (why) => stderr(`askq: ${why}`),
+        })
+      : undefined;
 
     const input = await readStdin();
 
@@ -259,15 +301,19 @@ export async function main(argv: string[], abort?: AbortSignal): Promise<number>
         printPrompt,
         watch: (values.watch ?? []).flatMap(splitTerms),
         window,
+        layout: backend === "claude" ? CLAUDE_LAYOUT : GEMINI_LAYOUT,
+        maxCalls,
       },
       {
         client: () =>
+          claude ??
           createClient({
             apiKey: apiKey ?? "",
             model,
             onRetry: (reason) => stderr(`askq: retrying: ${reason}`),
           }),
         overviewClient: () =>
+          claude ??
           createClient({
             apiKey: apiKey ?? "",
             model: OVERVIEW_MODEL,

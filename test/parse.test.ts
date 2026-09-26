@@ -20,7 +20,7 @@ describe("compact response parsing", () => {
         "- The launch post sets the claims [q01]",
       ].join("\n"),
     );
-    expect(p.own).toEqual(["@acme", "acme_staff"]);
+    expect(p.own).toEqual(["acme"]);
     expect(p.threads).toEqual([
       ["i001", "i004"],
       ["i007", "i009"],
