@@ -40,14 +40,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/smoke"
           cd "$RUNNER_TEMP/smoke"
           npm init -y >/dev/null
-          npm install "$GITHUB_WORKSPACE"/askq-*.tgz
+          npm install "$GITHUB_WORKSPACE"/thebrubaker-askq-*.tgz
           npx --no-install askq --help >/dev/null
 
       - name: Refuse to republish an existing version
         run: |
           version="$(node -p "require('./package.json').version")"
-          if npm view "askq@${version}" version >/dev/null 2>&1; then
-            echo "askq@${version} is already on npm" >&2
+          if npm view "@thebrubaker/askq@${version}" version >/dev/null 2>&1; then
+            echo "@thebrubaker/askq@${version} is already on npm" >&2
             exit 1
           fi
 

@@ -1,5 +1,5 @@
 {
-  "name": "askq",
+  "name": "@thebrubaker/askq",
   "version": "0.4.0",
   "description": "Ask one question of a whole dataset and get back what to read. Every item is judged twice; code checks that every item came back.",
   "type": "module",
@@ -45,5 +45,8 @@
     "twitter",
     "jq",
     "agents"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

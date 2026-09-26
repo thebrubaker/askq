@@ -16,10 +16,13 @@ leads, the read list, the maybe list, and five items it skipped, so you can chec
 skip them.
 
 ```bash
-jq -c '.[]' tweets.json | npx askq \
+jq -c '.[]' tweets.json | npx @thebrubaker/askq \
   "which of these report hands-on results with a local voice model?" \
   --context "tweets from an X search; I care about latency, quality and hardware"
 ```
+
+Install with `npm i -g @thebrubaker/askq` (the command is `askq`), or run it once with
+`npx @thebrubaker/askq`.
 
 Requires Claude Code's `claude` CLI, installed and signed in: askq runs Sonnet through it, on your
 Claude subscription. About 30 seconds and 7 calls for 150 tweets. `--backend gemini` uses
